@@ -13,6 +13,7 @@ import {
   handleContact,
   handleVoice,
 } from './flow';
+import { handleApi } from './api';
 
 export interface CloudflareEnv {
   TELEGRAM_BOT_TOKEN: string;
@@ -28,6 +29,18 @@ export interface CloudflareEnv {
 export default {
   async fetch(request: Request, env: CloudflareEnv): Promise<Response> {
     setDbIds(env.M2026_DATA_SOURCE_ID, env.POSITIONS_DATA_SOURCE_ID);
+    const url = new URL(request.url);
+
+    // API для Web App (отдельный путь от Telegram webhook)
+    if (url.pathname.startsWith('/api/')) {
+      const notion = new NotionClient({ auth: env.NOTION_TOKEN });
+      return handleApi(request, {
+        kv: env.SESSIONS,
+        notion,
+        telegramBotToken: env.TELEGRAM_BOT_TOKEN,
+      }, url);
+    }
+
     const bot = new Bot(env.TELEGRAM_BOT_TOKEN);
     const notion = new NotionClient({ auth: env.NOTION_TOKEN });
     const handlerEnv = {
