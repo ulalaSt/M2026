@@ -1,0 +1,15 @@
+// ID баз данных в Notion (взяты из URL баз)
+export const M2026_DATA_SOURCE_ID = '35164daf-6c5b-8168-916c-000b1340abf2';
+export const POSITIONS_DATA_SOURCE_ID = '5ec8589d-2ffc-4584-8955-eba580cc10f6';
+
+// Telegram user IDs, которым разрешено пользоваться ботом
+export const ALLOWED_USER_IDS = [
+  687463957, // основной владелец
+  // добавь сюда ID приёмщиков по мере необходимости
+];
+
+// Кэш select-опций живёт в KV столько секунд
+export const SCHEMA_CACHE_TTL_SECONDS = 300; // 5 минут
+
+// Сессия пользователя в KV живёт столько секунд (если бросил диалог)
+export const SESSION_TTL_SECONDS = 60 * 60; // 1 час

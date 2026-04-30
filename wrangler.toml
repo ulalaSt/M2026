@@ -1,0 +1,7 @@
+name = "m2026-bot"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "ebfd511e35c341d4a24cc81c2519ef17"
