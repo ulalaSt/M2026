@@ -282,115 +282,6 @@ async function handleShowTimeline(ctx: Context, env: Env, startISO: string, endI
   }
 }
 
-async function handleUpdatePositions(
-  ctx: Context,
-  env: Env,
-  client: FoundClient,
-  intent: Extract<AIIntent, { intent: 'update_positions' }>,
-  usageLine?: string,
-): Promise<void> {
-  const userId = ctx.from!.id;
-  if (client.positions.length === 0) {
-    await ctx.reply(`❌ У клиента ${client.phone} нет позиций.`);
-    return;
-  }
-  const matched = intent.match
-    ? matchPositions(client.positions, intent.match)
-    : client.positions.slice();
-  if (matched.length === 0) {
-    await ctx.reply(`❌ Не нашёл позиции по фильтру: ${formatPos(intent.match ?? {})}`);
-    return;
-  }
-
-  // Split-режим: одна исходная позиция, отщепляем splitQty
-  if (intent.splitQty && intent.splitQty > 0) {
-    if (matched.length > 1) {
-      // показать picker
-      const session = emptySession();
-      session.step = 'edit_pick_position';
-      session.positionCandidates = matched.map(m => ({ positionPageId: m.pageId, label: formatPos(m) }));
-      session.pendingChange = {
-        type: 'update_positions',
-        phone: client.phone,
-        match: intent.match ?? {},
-        newColor: intent.newColor,
-        newSize: intent.newSize,
-        newKind: intent.newKind,
-        splitQty: intent.splitQty,
-      };
-      session.selectedPageId = client.pageId;
-      await saveSession(env.kv, userId, session);
-      const kb = new InlineKeyboard();
-      for (const m of matched) kb.text(`✏ ${formatPos(m)}`, `pickpos:${m.pageId}`).row();
-      kb.text('❌ Отмена', 'pickpos:cancel');
-      await ctx.reply(`Несколько подходящих позиций. Выбери одну:\n\n${formatClient(client)}\n\n${usageLine}`, { reply_markup: kb });
-      return;
-    }
-    const src = matched[0];
-    if ((src.qty ?? 0) < intent.splitQty) {
-      await ctx.reply(`❌ В «${formatPos(src)}» только ${src.qty} шт.`);
-      return;
-    }
-    const target = {
-      color: intent.newColor ?? src.color,
-      size: intent.newSize ?? src.size,
-      kind: intent.newKind ?? src.kind,
-    };
-    const dest = client.positions.find(p =>
-      p.pageId !== src.pageId &&
-      p.color === target.color && p.size === target.size && p.kind === target.kind,
-    );
-    const remaining = (src.qty ?? 0) - intent.splitQty;
-    const ops: PendingOp[] = [];
-    if (remaining === 0) ops.push({ type: 'archive_position', positionPageId: src.pageId });
-    else ops.push({ type: 'update_position', positionPageId: src.pageId, changes: { qty: remaining } });
-    if (dest) {
-      ops.push({ type: 'update_position', positionPageId: dest.pageId, changes: { qty: (dest.qty ?? 0) + intent.splitQty } });
-    } else {
-      if (!target.color || !target.size || !target.kind) {
-        await ctx.reply('❌ Недостаточно данных для целевой позиции.');
-        return;
-      }
-      ops.push({ type: 'add_position', pos: { color: target.color, size: target.size, kind: target.kind, qty: intent.splitQty } });
-    }
-    const srcAfter = remaining === 0 ? '(удалить)' : `${formatPos(src)} → ×${remaining}`;
-    const destAfter = dest
-      ? `${formatPos(dest)} → ×${(dest.qty ?? 0) + intent.splitQty}`
-      : `создать ${target.color} ${target.size} ${target.kind} ×${intent.splitQty}`;
-    const desc = `✏ Разделить ${intent.splitQty} шт:\n  • было: ${formatPos(src)}\n  • станет: ${srcAfter}\n  • перенос: ${destAfter}`;
-    return saveAndPrompt(ctx, env, client, desc, usageLine, ops);
-  }
-
-  // Обычный режим: применяем set-поля ко всем matched
-  const changes: Record<string, any> = {};
-  if (intent.newColor) changes.color = intent.newColor;
-  if (intent.newSize) changes.size = intent.newSize;
-  if (intent.newKind) changes.kind = intent.newKind;
-  if (typeof intent.newQty === 'number') changes.qty = intent.newQty;
-  const ops: PendingOp[] = matched.map(p => ({
-    type: 'update_position', positionPageId: p.pageId, changes,
-  }));
-
-  const fields = [
-    intent.newColor && `цвет → ${intent.newColor}`,
-    intent.newSize && `размер → ${intent.newSize}`,
-    intent.newKind && `вид → ${intent.newKind}`,
-    typeof intent.newQty === 'number' && `кол-во → ${intent.newQty}`,
-  ].filter(Boolean).join(', ');
-  const scope = intent.match
-    ? `по фильтру (${matched.length})`
-    : `все (${matched.length})`;
-  const desc = `✏ Позиции ${scope}: ${fields}`;
-  return saveAndPrompt(ctx, env, client, desc, usageLine, ops);
-}
-
-function matchPositions(positions: FoundPosition[], match: { color?: string; size?: string; kind?: string }): FoundPosition[] {
-  return positions.filter(p =>
-    (!match.color || p.color === match.color) &&
-    (!match.size || p.size === match.size) &&
-    (!match.kind || p.kind === match.kind),
-  );
-}
 
 const THREAD_TTL_MS = 5 * 60 * 1000;
 
@@ -406,9 +297,9 @@ function buildClientContext(c: FoundClient): string {
   if (c.note) lines.push(`Примечание: ${c.note}`);
   if (c.positions.length) {
     lines.push(`Позиции (${c.positions.length}):`);
-    for (const p of c.positions) {
-      lines.push(`  - ${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`);
-    }
+    c.positions.forEach((p, i) => {
+      lines.push(`  [${i + 1}] ${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`);
+    });
   }
   return lines.join('\n');
 }
@@ -451,114 +342,153 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
       return;
     }
 
-    // intent — чистим thread
+    // actions — чистим thread
     if (session.aiThread) {
       delete session.aiThread;
       await saveSession(env.kv, userId, session);
     }
-    return handleParsedIntent(ctx, env, r.intent, usageLine, prefetchedClient);
+    return handleParsedActions(ctx, env, r.actions, usageLine, prefetchedClient);
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
   }
 }
 
-export async function handleParsedIntent(ctx: Context, env: Env, intent: AIIntent, usageLine: string, prefetched?: FoundClient): Promise<void> {
-  if (intent.intent === 'unclear') {
-    await ctx.reply(`🤔 Не понял: ${intent.reason}\n\n${usageLine}`);
+export async function handleParsedActions(
+  ctx: Context,
+  env: Env,
+  actions: AIIntent[],
+  usageLine: string,
+  prefetched?: FoundClient,
+): Promise<void> {
+  // Сначала разбираем show / unclear (read-only) — выводим сразу, не накапливаем
+  for (const a of actions) {
+    if (a.intent === 'unclear') {
+      await ctx.reply(`🤔 Не понял: ${a.reason}\n\n${usageLine}`);
+      return;
+    }
+  }
+
+  const showActions = actions.filter(a => a.intent === 'show_client' || a.intent === 'show_orders' || a.intent === 'show_timeline');
+  for (const a of showActions) {
+    if (a.intent === 'show_orders') await handleShowOrders(ctx, env, a);
+    else if (a.intent === 'show_timeline') await handleShowTimeline(ctx, env, a.startDate, a.endDate);
+    else if (a.intent === 'show_client') {
+      const clients = await findClientsByPhone(env.notion, a.phone);
+      if (clients.length === 0) { await ctx.reply(`❌ Клиент с номером ${a.phone} не найден.`); continue; }
+      if (clients.length > 1) { await ctx.reply(`❌ Несколько клиентов (${clients.length}). Уточни.`); continue; }
+      const c = clients[0];
+      const body = a.mode === 'receipt' ? formatReceipt(c) : formatFullCard(c);
+      await ctx.reply(body);
+    }
+  }
+
+  const editActions = actions.filter(a =>
+    a.intent === 'update_client' || a.intent === 'update_position' ||
+    a.intent === 'add_position' || a.intent === 'delete_position');
+
+  if (editActions.length === 0) {
+    if (showActions.length > 0) await ctx.reply(usageLine);
     return;
   }
 
-  if (intent.intent === 'show_orders') {
-    await handleShowOrders(ctx, env, intent);
-    await ctx.reply(usageLine);
+  // Все edit-действия должны относиться к одному клиенту
+  const phones = new Set(editActions.map(a => (a as any).phone).filter(Boolean));
+  if (phones.size === 0) {
+    await ctx.reply(`❌ Не указан телефон клиента.\n\n${usageLine}`);
     return;
   }
-
-  if (intent.intent === 'show_timeline') {
-    await handleShowTimeline(ctx, env, intent.startDate, intent.endDate);
-    await ctx.reply(usageLine);
+  if (phones.size > 1) {
+    await ctx.reply(`❌ Действия для разных клиентов в одном запросе пока не поддерживаются.\n\n${usageLine}`);
     return;
   }
-
-  if (!intent.phone) {
-    await ctx.reply(`❌ Не указан телефон клиента в запросе.\n\n${usageLine}`);
-    return;
-  }
-
-  if (intent.intent === 'show_client') {
-    const clients = await findClientsByPhone(env.notion, intent.phone);
-    if (clients.length === 0) { await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.\n\n${usageLine}`); return; }
-    if (clients.length > 1) { await ctx.reply(`❌ Несколько клиентов (${clients.length}). Уточни номер.\n\n${usageLine}`); return; }
-    const c = clients[0];
-    const body = intent.mode === 'receipt' ? formatReceipt(c) : formatFullCard(c);
-    await ctx.reply(`${body}\n\n${usageLine}`);
-    return;
-  }
+  const phone = [...phones][0];
 
   let client: FoundClient;
-  if (prefetched && prefetched.phone.replace(/\D/g, '').endsWith(intent.phone.replace(/\D/g, ''))) {
+  if (prefetched && prefetched.phone.replace(/\D/g, '').endsWith(phone.replace(/\D/g, ''))) {
     client = prefetched;
   } else {
-    const clients = await findClientsByPhone(env.notion, intent.phone);
+    const clients = await findClientsByPhone(env.notion, phone);
     if (clients.length === 0) {
-      await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.\n\n${usageLine}`);
+      await ctx.reply(`❌ Клиент с номером ${phone} не найден.\n\n${usageLine}`);
       return;
     }
     if (clients.length > 1) {
-      await ctx.reply(`❌ Найдено несколько клиентов (${clients.length}) с похожим номером. Уточни.\n\n${usageLine}`);
+      await ctx.reply(`❌ Несколько клиентов (${clients.length}). Уточни.\n\n${usageLine}`);
       return;
     }
     client = clients[0];
   }
-  await prepareEdit(ctx, env, client, intent, usageLine);
-}
 
-async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: AIIntent, usageLine?: string): Promise<void> {
-  const userId = ctx.from!.id;
+  // Собираем PendingOps + descriptions
+  const ops: PendingOp[] = [];
+  const descLines: string[] = [];
+  let updateClientChanges: Record<string, any> = {};
 
-  switch (intent.intent) {
-    case 'change_date': {
-      const desc = `📅 Дата: ${fmtDate(client.date)} → ${fmtDate(intent.newDate)}`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'update_client', changes: { date: intent.newDate } },
-      ]);
-    }
-    case 'change_status': {
-      const desc = `🚦 Статус: ${client.status ?? '—'} → ${intent.newStatus}`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'update_client', changes: { status: intent.newStatus } },
-      ]);
-    }
-    case 'change_payment': {
-      const cur = client.paid ?? 0;
-      const next = intent.setPaid !== undefined ? intent.setPaid : cur + (intent.addPaid ?? 0);
-      const desc = `💰 Оплачено: ${cur} → ${next} тг`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'update_client', changes: { paid: next } },
-      ]);
-    }
-    case 'change_note': {
-      const desc = `💬 Примечание: ${client.note ?? '—'} → ${intent.note}`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'update_client', changes: { note: intent.note } },
-      ]);
-    }
-    case 'change_school': {
-      const desc = `🏫 Уч. заведение: ${client.school ?? '—'} → ${intent.newSchool}`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'update_client', changes: { school: intent.newSchool } },
-      ]);
-    }
-    case 'add_position': {
-      const desc = `➕ Добавить: ${intent.color} ${intent.size} ${intent.kind} ×${intent.qty}`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'add_position', pos: { color: intent.color, size: intent.size, kind: intent.kind, qty: intent.qty } },
-      ]);
-    }
-    case 'update_positions': {
-      return handleUpdatePositions(ctx, env, client, intent, usageLine);
+  for (const a of editActions) {
+    if (a.intent === 'update_client') {
+      const ch: Record<string, any> = {};
+      if (a.date !== undefined) { ch.date = a.date; descLines.push(`📅 Дата: ${fmtDate(client.date)} → ${fmtDate(a.date)}`); }
+      if (a.status !== undefined) { ch.status = a.status; descLines.push(`🚦 Статус: ${client.status ?? '—'} → ${a.status}`); }
+      if (a.school !== undefined) { ch.school = a.school; descLines.push(`🏫 Школа: ${client.school ?? '—'} → ${a.school}`); }
+      if (a.note !== undefined) { ch.note = a.note; descLines.push(`💬 Примечание: ${client.note ?? '—'} → ${a.note}`); }
+      if (typeof a.discount === 'number') { ch.discount = a.discount; descLines.push(`🏷 Скидка: ${client.discount ?? 0} → ${a.discount} тг`); }
+      if (typeof a.setPaid === 'number') {
+        ch.paid = a.setPaid;
+        descLines.push(`💰 Оплачено: ${client.paid ?? 0} → ${a.setPaid} тг`);
+      } else if (typeof a.addPaid === 'number') {
+        const next = (client.paid ?? 0) + a.addPaid;
+        ch.paid = next;
+        descLines.push(`💰 Оплачено: ${client.paid ?? 0} → ${next} тг (+${a.addPaid})`);
+      }
+      // Notion: если приходит несколько update_client подряд, мерджим в один update_client op
+      updateClientChanges = { ...updateClientChanges, ...ch };
+    } else if (a.intent === 'update_position') {
+      const pos = client.positions[a.positionIndex - 1];
+      if (!pos) {
+        await ctx.reply(`❌ Нет позиции с индексом ${a.positionIndex}.`);
+        return;
+      }
+      const ch: Record<string, any> = {};
+      if (a.newColor) ch.color = a.newColor;
+      if (a.newSize) ch.size = a.newSize;
+      if (a.newKind) ch.kind = a.newKind;
+      if (typeof a.newQty === 'number') ch.qty = a.newQty;
+      ops.push({ type: 'update_position', positionPageId: pos.pageId, changes: ch });
+      const after = formatPos({
+        color: a.newColor ?? pos.color,
+        size: a.newSize ?? pos.size,
+        kind: a.newKind ?? pos.kind,
+        qty: a.newQty ?? pos.qty,
+      });
+      descLines.push(`✏ Поз. [${a.positionIndex}]: ${formatPos(pos)} → ${after}`);
+    } else if (a.intent === 'add_position') {
+      ops.push({ type: 'add_position', pos: { color: a.color, size: a.size, kind: a.kind, qty: a.qty } });
+      descLines.push(`➕ Позиция: ${a.color} ${a.size} ${a.kind} ×${a.qty}`);
+    } else if (a.intent === 'delete_position') {
+      const pos = client.positions[a.positionIndex - 1];
+      if (!pos) {
+        await ctx.reply(`❌ Нет позиции с индексом ${a.positionIndex}.`);
+        return;
+      }
+      ops.push({ type: 'archive_position', positionPageId: pos.pageId });
+      descLines.push(`🗑 Удалить поз. [${a.positionIndex}]: ${formatPos(pos)}`);
     }
   }
+
+  if (Object.keys(updateClientChanges).length > 0) {
+    ops.unshift({ type: 'update_client', changes: updateClientChanges });
+  }
+
+  if (ops.length === 0) {
+    await ctx.reply(`❌ Нет применимых изменений.\n\n${usageLine}`);
+    return;
+  }
+
+  await saveAndPrompt(ctx, env, client, descLines.join('\n'), usageLine, ops);
+}
+
+export async function handleParsedIntent(ctx: Context, env: Env, intent: AIIntent, usageLine: string, prefetched?: FoundClient): Promise<void> {
+  return handleParsedActions(ctx, env, [intent], usageLine, prefetched);
 }
 
 async function saveAndPrompt(
@@ -623,46 +553,9 @@ export async function cancelPendingEdit(ctx: Context, env: Env): Promise<void> {
   await ctx.reply('Отменено.');
 }
 
-export async function pickPosition(ctx: Context, env: Env, positionPageId: string): Promise<void> {
-  const userId = ctx.from!.id;
-  const session = await getSession(env.kv, userId);
-  const pc = session.pendingChange;
-  const candidates = session.positionCandidates ?? [];
-  if (!pc || pc.type !== 'update_positions' || !session.selectedPageId) {
-    await ctx.reply('Сессия истекла.');
-    await clearSession(env.kv, userId);
-    return;
-  }
-  const found = candidates.find(c => c.positionPageId === positionPageId);
-  if (!found) {
-    await ctx.reply('Позиция не найдена в выборке.');
-    return;
-  }
-  const clients = await findClientsByPhone(env.notion, pc.phone);
-  if (clients.length !== 1) {
-    await ctx.reply('Клиент не найден.');
-    await clearSession(env.kv, userId);
-    return;
-  }
-  const client = clients[0];
-  const intent: Extract<AIIntent, { intent: 'update_positions' }> = {
-    intent: 'update_positions',
-    phone: pc.phone,
-    // фильтр сужаем до конкретной позиции через её атрибуты — после picker мы знаем точный pageId
-    match: { color: undefined, size: undefined, kind: undefined },
-    newColor: pc.newColor,
-    newSize: pc.newSize,
-    newKind: pc.newKind,
-    newQty: pc.newQty,
-    splitQty: pc.splitQty,
-  };
-  // ограничиваем positions до выбранной — переопределяем client locally
-  const pos = client.positions.find(p => p.pageId === positionPageId);
-  if (!pos) {
-    await ctx.reply('Позиция не найдена.');
-    await clearSession(env.kv, userId);
-    return;
-  }
-  const localClient: FoundClient = { ...client, positions: [pos] };
-  return handleUpdatePositions(ctx, env, localClient, { ...intent, match: undefined }, '');
+// pickPosition больше не нужен — AI ссылается на позиции по индексам напрямую.
+// Оставим заглушку чтобы не ломать импорты в flow.ts при наличии стейл-сессий.
+export async function pickPosition(ctx: Context, env: Env, _positionPageId: string): Promise<void> {
+  await clearSession(env.kv, ctx.from!.id);
+  await ctx.reply('Сессия устарела — повтори запрос.');
 }

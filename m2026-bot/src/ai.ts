@@ -1,143 +1,131 @@
 import { Schema } from './schema';
 
 export type AIIntent =
-  | { intent: 'change_date'; phone: string; newDate: string }
-  | { intent: 'change_status'; phone: string; newStatus: string }
-  | { intent: 'change_payment'; phone: string; addPaid?: number; setPaid?: number }
-  | { intent: 'change_note'; phone: string; note: string }
-  | { intent: 'change_school'; phone: string; newSchool: string }
   | {
-      intent: 'update_positions';
+      intent: 'update_client';
       phone: string;
-      // match отсутствует или пустой → применить ко ВСЕМ позициям клиента
-      match?: { color?: string; size?: string; kind?: string };
-      // что изменить
+      date?: string;
+      time?: string;
+      school?: string;
+      status?: string;
+      addPaid?: number;
+      setPaid?: number;
+      discount?: number;
+      note?: string;
+    }
+  | {
+      intent: 'update_position';
+      phone: string;
+      positionIndex: number; // 1-based, ссылается на список из контекста
       newColor?: string;
       newSize?: string;
       newKind?: string;
       newQty?: number;
-      // если указан splitQty — отщепить N штук с найденной позиции (split)
-      splitQty?: number;
     }
   | { intent: 'add_position'; phone: string; color: string; size: string; kind: string; qty: number }
+  | { intent: 'delete_position'; phone: string; positionIndex: number }
   | { intent: 'show_client'; phone: string; mode?: 'card' | 'receipt' }
   | { intent: 'show_orders'; startDate?: string; endDate?: string; limit?: number; status?: string }
   | { intent: 'show_timeline'; startDate: string; endDate: string }
   | { intent: 'unclear'; reason: string };
 
+const ACTION_PROPERTIES = {
+  intent: {
+    type: 'string',
+    enum: ['update_client', 'update_position', 'add_position', 'delete_position', 'show_client', 'show_orders', 'show_timeline', 'unclear'],
+  },
+  phone: { type: 'string', description: 'Телефон клиента или последние цифры. Пусто если не указан.' },
+  // update_client поля
+  date: { type: 'string', description: 'YYYY-MM-DD' },
+  time: { type: 'string', description: 'HH:MM' },
+  school: { type: 'string', description: 'Точно из списка schools' },
+  status: { type: 'string', description: 'Точно из списка statuses' },
+  addPaid: { type: 'number', description: 'Прибавить к оплачено' },
+  setPaid: { type: 'number', description: 'Установить оплачено в это значение' },
+  discount: { type: 'number' },
+  note: { type: 'string' },
+  // update_position / delete_position
+  positionIndex: { type: 'number', description: '1-based индекс из списка позиций клиента' },
+  newColor: { type: 'string' },
+  newSize: { type: 'string' },
+  newKind: { type: 'string' },
+  newQty: { type: 'number' },
+  // add_position
+  color: { type: 'string' },
+  size: { type: 'string' },
+  kind: { type: 'string' },
+  qty: { type: 'number' },
+  // show_*
+  mode: { type: 'string', enum: ['card', 'receipt'] },
+  startDate: { type: 'string' },
+  endDate: { type: 'string' },
+  limit: { type: 'number' },
+  // unclear
+  reason: { type: 'string' },
+} as const;
+
 const TOOL = {
   name: 'register_intent',
-  description: 'Зарегистрировать намерение пользователя по редактированию клиента',
+  description: 'Зарегистрировать одно или несколько действий. Любую сложную задачу разлагай на простые CRUD-действия и возвращай массивом — они применятся одной транзакцией.',
   input_schema: {
     type: 'object',
     properties: {
-      intent: {
-        type: 'string',
-        enum: ['change_date', 'change_status', 'change_payment', 'change_note', 'change_school', 'update_positions', 'add_position', 'show_client', 'show_orders', 'show_timeline', 'unclear'],
-        description: 'Тип действия',
-      },
-      phone: { type: 'string', description: 'Телефон клиента или пустая строка если не указан' },
-      newDate: { type: 'string', description: 'Дата в формате YYYY-MM-DD' },
-      newStatus: { type: 'string', description: 'Новый статус (точно из списка)' },
-      addPaid: { type: 'number', description: 'Сколько добавить к оплате' },
-      setPaid: { type: 'number', description: 'Установить оплачено в это значение' },
-      note: { type: 'string', description: 'Текст примечания' },
-      match: {
-        type: 'object',
-        description: 'Фильтр позиций для update_positions. Пусто/отсутствует = все позиции клиента.',
-        properties: {
-          color: { type: 'string' },
-          size: { type: 'string' },
-          kind: { type: 'string' },
+      actions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: ACTION_PROPERTIES,
+          required: ['intent'],
         },
       },
-      splitQty: { type: 'number', description: 'Сколько штук отщепить (split). Если указан — берётся одна позиция по match и из неё переносится N штук в новую с set.' },
-      newColor: { type: 'string' },
-      newSize: { type: 'string' },
-      newKind: { type: 'string' },
-      newQty: { type: 'number' },
-      newSchool: { type: 'string', description: 'Точное название учебного заведения из списка' },
-      color: { type: 'string' },
-      size: { type: 'string' },
-      kind: { type: 'string' },
-      qty: { type: 'number' },
-      reason: { type: 'string', description: 'Объяснение если intent=unclear' },
-      mode: { type: 'string', enum: ['card', 'receipt'], description: 'card = карточка клиента; receipt = чек/расчёт по оплате' },
-      startDate: { type: 'string', description: 'Дата начала диапазона YYYY-MM-DD' },
-      endDate: { type: 'string', description: 'Дата конца диапазона YYYY-MM-DD' },
-      limit: { type: 'number', description: 'Сколько ближайших заказов показать (если диапазон не задан)' },
-      status: { type: 'string', description: 'Фильтр по статусу для show_orders' },
     },
-    required: ['intent'],
+    required: ['actions'],
   },
 };
 
 function buildSystemPrompt(schema: Schema): string {
   const today = new Date().toISOString().slice(0, 10);
-  return `Ты помощник для редактирования клиентов в базе мантий. Извлекай намерение из сообщения и вызывай инструмент register_intent.
+  return `Ты помощник для редактирования заказов мантий. Извлекай из сообщения список простых CRUD-действий и вызывай register_intent с массивом actions.
 
 Сегодня: ${today}.
 
-Доступные значения:
+Доступные значения (используй ТОЛЬКО их):
 - statuses: ${schema.statuses.join(', ')}
 - schools: ${schema.schools.join(', ')}
 - colors: ${schema.colors.join(', ')}
 - sizes: ${schema.sizes.join(', ')}
 - kinds: ${schema.kinds.join(', ')}
 
-Понимаешь русский И казахский. Маппинг казахских слов → значения базы (которые на русском):
+Действия (atom-операции):
+- update_client — изменить любые поля клиента: date, time, school, status, addPaid (прибавить к оплачено), setPaid (установить оплачено), discount, note. Можно несколько полей одновременно.
+- update_position — изменить ОДНУ позицию по индексу: positionIndex + newColor/newSize/newKind/newQty.
+- add_position — добавить новую позицию: color, size, kind, qty.
+- delete_position — удалить позицию по индексу.
+- show_client (mode='card'|'receipt'), show_orders (startDate/endDate/limit), show_timeline (startDate/endDate), unclear (reason).
 
-Статусы:
-- "забрал/получил/выдан/выполнен" / каз. "алып кетті/алды/берді/берілді/орындалды" → ЗАБРАЛИ
-- "вернул/возврат" / каз. "қайтарды/қайтарылды" → ВЕРНУЛИ
-- "бронь" / каз. "брон" → БРОНЬ
+Принцип: разлагай сложное на простое и возвращай массивом.
+- "поменяй все M на L" с 3 позициями M → массив из 3 update_position с newSize='L'.
+- "перенеси 5 M на S" → 2 действия: update_position у источника (newQty = старое-5) + add_position {size:'S', qty:5} с тем же color/kind.
+- "5566 забрал и доплатил 2000" → 1 update_client {status:'ЗАБРАЛИ', addPaid:2000}.
+- Если в команде есть несколько изменений — обязательно делай массив, а не задавай уточняющие вопросы.
 
-Оплата:
-- "оплатил ещё N / доплатил N" / каз. "тағы N төледі / қосымша N" → addPaid=N (НЕ setPaid)
-- "оплатил всего N / оплачено N" / каз. "барлығы N төленді" → setPaid=N
+Понимаешь русский и казахский. Маппинг (выбирай ближайшее из списков):
+- "забрал/получил/выдан" / каз. "алып кетті/алды/берді" → ЗАБРАЛИ
+- "вернул" / "қайтарды" → ВЕРНУЛИ
+- "бронь" / "брон" → БРОНЬ
+- цвета каз: жасыл=зелёный, қызыл=красный, көк=синий, бордо=бордовый, ақ=белый, қара=чёрный
+- виды каз: ересек=Взрослый, балалар=Детский, бақша=Садик
 
-Цвета на казахском (примерно): жасыл=зелёный, қызыл=красный, көк=синий, бордо=бордовый, ақ=белый, қара=чёрный — выбирай ближайший из списка colors выше.
+Идентификация клиента:
+- Любые цифры 4-11 длиной — это телефон или его последние цифры. Передавай как есть в phone.
+- Никаких "номеров заказа" не существует — всё это телефон.
+- Если в команде нет цифр — phone="".
 
-Размеры: на казахском как и на русском (S/M/L).
-
-Виды:
-- "ересек/үлкен" → Взрослый
-- "балалар" → Детский
-- "бала бақша/бақша" → Садик
-
-Правила действий:
-- "добавь N" / каз. "қос/қосу N" → add_position с qty=N
-- update_positions — универсальное обновление позиций:
-  - "все позиции на M" / "сделай всех Взрослыми" → match отсутствует, newSize='M' (или newKind='Взрослый')
-  - "поменяй M на L" → match={size:'M'}, newSize='L'
-  - "поменяй зелёный на красный" → match={color:'🟢 зелёный'}, newColor='🔴 красный'
-  - "поменяй кол-во M на 10" → match={size:'M'}, newQty=10
-  - "перенеси N M на S" / "разбей N зелёный на красный" → match={size:'M'}, newSize='S', splitQty=N
-  - newQty в обычном режиме (без splitQty) ставит количество для всех найденных
-  - splitQty — отщепляет N штук из ОДНОЙ найденной позиции и переносит в новую с указанными изменениями
-- "перенеси на <дата>" / "поменяй дату" / каз. "<дата>-ға ауыстыр / көшір" → change_date (формат YYYY-MM-DD)
-- "школа <X>" / "это тоже <X>" / "уч.заведение <X>" / каз. "мектеп <X>" → change_school. newSchool — выбирай ближайшее из schools (можно по части названия).
-
-Read-only запросы:
-- "покажи 1234" / "карточка 1234" / каз. "1234-ті көрсет" → show_client с phone, mode=card
-- "сколько осталось платить у 1234" / "какие мантии у 1234" → show_client с phone, mode=card (карточка показывает остаток и позиции)
-- "чек клиенту 1234" / "квитанция 1234" / каз. "чек 1234" → show_client с phone, mode=receipt (форматированный текст для пересылки клиенту)
-- "покажи на завтра / сегодня / N дней" / "что подготовить на завтра" / "заказы на эту неделю" → show_orders с startDate/endDate (даты вычисляешь от сегодня)
-- "ближайший заказ" / "следующий заказ" → show_orders с startDate=сегодня, limit=1
-- "первые N заказов" / "ближайшие N заказов" / "следующие N" → show_orders с startDate=сегодня, limit=N
-- "таймлайн" / "календарь на месяц" / "по дням" / "визуально по датам" → show_timeline. startDate/endDate обязательны (если месяц — 30 дней от сегодня).
-- Запросы read-only НЕ требуют подтверждения — выполняются сразу.
-- ВАЖНО: клиенты идентифицируются ТОЛЬКО по телефону. Любые цифры от 4 до 11 длиной упомянутые в команде — это телефон или его последние цифры. Никаких "номеров заказа" / "ID клиента" / "номеров заявки" не существует — это всё телефон.
-- "по 5566", "на заказе 5566", "у клиента 5566", "5566 ...", "клиент 1234" → phone="5566" (или "1234" — передавай цифры как есть, поиск найдёт по последним цифрам)
-- Телефон может быть полным (87771112233, +77771112233) или последними 4-7 цифрами ("2233", "112233"). Передавай как есть в phone.
-- Если в команде вообще нет цифр-идентификатора — phone=""
-- Используй ТОЛЬКО значения из списков выше. Никогда не придумывай новых статусов/цветов/размеров/видов.
-- Если непонятно или не хватает данных — intent=unclear с reason.`;
+Если данных не хватает или есть неоднозначность — задай короткий уточняющий вопрос текстом ВМЕСТО tool call. Если данных достаточно — сразу register_intent (даже если несколько действий).`;
 }
 
 export type ModelKey = 'haiku' | 'sonnet';
 export type Usage = { inputTokens: number; outputTokens: number; model: ModelKey };
-export type AIResult = { intent: AIIntent; usage: Usage };
 
 const PRICING: Record<ModelKey, { in: number; out: number }> = {
   haiku: { in: 1 / 1_000_000, out: 5 / 1_000_000 },
@@ -154,6 +142,10 @@ export function formatUsage(u: Usage): string {
 
 export type ChatMsg = { role: 'user' | 'assistant'; content: string };
 
+export type ParseResult =
+  | { kind: 'actions'; actions: AIIntent[]; usage: Usage }
+  | { kind: 'question'; text: string; usage: Usage };
+
 /** Извлекает «телефонную» строку из произвольного текста. Любая последовательность 4+ цифр. */
 export function extractPhoneFromText(text: string): string | null {
   const m = text.match(/(\+?\d[\d\s\-()]{3,}\d)/);
@@ -161,10 +153,6 @@ export function extractPhoneFromText(text: string): string | null {
   const digits = m[1].replace(/\D/g, '');
   return digits.length >= 4 ? digits : null;
 }
-
-export type ParseResult =
-  | { kind: 'intent'; intent: AIIntent; usage: Usage }
-  | { kind: 'question'; text: string; usage: Usage };
 
 export async function parseIntent(
   apiKey: string,
@@ -174,13 +162,13 @@ export async function parseIntent(
   clientContext?: string,
 ): Promise<ParseResult> {
   const messages = [...history, { role: 'user', content: userMessage }];
-  let system = buildSystemPrompt(schema) + '\n\nЕсли в запросе не хватает данных или есть неоднозначность — задай уточняющий вопрос текстом (одно предложение, по делу). Если данных достаточно — сразу вызови register_intent. Не вызывай register_intent с intent=unclear — лучше задай вопрос.';
+  let system = buildSystemPrompt(schema);
   if (clientContext) {
-    system += '\n\n=== АКТУАЛЬНЫЕ ДАННЫЕ КЛИЕНТА (используй их вместо вопросов про позиции) ===\n' + clientContext;
+    system += '\n\n=== АКТУАЛЬНЫЕ ДАННЫЕ КЛИЕНТА (используй индексы позиций отсюда) ===\n' + clientContext;
   }
   const body = {
     model: 'claude-haiku-4-5',
-    max_tokens: 500,
+    max_tokens: 800,
     temperature: 0,
     system,
     tools: [TOOL],
@@ -208,12 +196,14 @@ export async function parseIntent(
   const blocks = json?.content ?? [];
   const tool = blocks.find((c: any) => c.type === 'tool_use' && c.name === 'register_intent');
   if (tool) {
-    return { kind: 'intent', intent: mapToIntent(tool.input ?? {}, schema), usage };
+    const args = tool.input ?? {};
+    const rawActions = Array.isArray(args.actions) ? args.actions : [args];
+    const actions = rawActions.map((a: any) => mapToIntent(a, schema));
+    return { kind: 'actions', actions, usage };
   }
   const text = blocks.find((c: any) => c.type === 'text');
   return { kind: 'question', text: (text?.text ?? 'Что-то не понял, уточни.').trim(), usage };
 }
-
 
 function mapToIntent(args: any, schema: Schema): AIIntent {
   const intent = args.intent as string;
@@ -229,7 +219,6 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
     const exact = validate(val, list);
     if (exact) return exact;
     const lower = val.toLowerCase();
-    // ищем элемент списка содержащий val или наоборот
     return list.find(x => {
       const xl = x.toLowerCase();
       return xl.includes(lower) || lower.includes(xl);
@@ -237,53 +226,33 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
   };
 
   switch (intent) {
-    case 'change_date': {
-      if (!args.newDate) return { intent: 'unclear', reason: 'Не указана дата' };
-      return { intent: 'change_date', phone, newDate: args.newDate };
+    case 'update_client': {
+      const r: any = { intent: 'update_client', phone };
+      if (typeof args.date === 'string') r.date = args.date;
+      if (typeof args.time === 'string') r.time = args.time;
+      const status = validate(args.status, schema.statuses);
+      if (status) r.status = status;
+      const school = validateFuzzy(args.school, schema.schools);
+      if (school) r.school = school;
+      if (typeof args.addPaid === 'number') r.addPaid = args.addPaid;
+      if (typeof args.setPaid === 'number') r.setPaid = args.setPaid;
+      if (typeof args.discount === 'number') r.discount = args.discount;
+      if (typeof args.note === 'string') r.note = args.note;
+      const hasAny = ['date','time','status','school','addPaid','setPaid','discount','note'].some(k => k in r);
+      if (!hasAny) return { intent: 'unclear', reason: 'update_client без полей' };
+      return r;
     }
-    case 'change_status': {
-      const status = validate(args.newStatus, schema.statuses);
-      if (!status) return { intent: 'unclear', reason: `Неизвестный статус: ${args.newStatus}` };
-      return { intent: 'change_status', phone, newStatus: status };
-    }
-    case 'change_payment': {
-      if (typeof args.addPaid === 'number') return { intent: 'change_payment', phone, addPaid: args.addPaid };
-      if (typeof args.setPaid === 'number') return { intent: 'change_payment', phone, setPaid: args.setPaid };
-      return { intent: 'unclear', reason: 'Не указана сумма оплаты' };
-    }
-    case 'change_note': {
-      if (!args.note) return { intent: 'unclear', reason: 'Не указан текст примечания' };
-      return { intent: 'change_note', phone, note: String(args.note) };
-    }
-    case 'change_school': {
-      const school = validateFuzzy(args.newSchool, schema.schools);
-      if (!school) return { intent: 'unclear', reason: `Неизвестное уч. заведение: ${args.newSchool}` };
-      return { intent: 'change_school', phone, newSchool: school };
-    }
-    case 'update_positions': {
-      const m = args.match ?? args.positionMatch ?? {};
-      const match: { color?: string; size?: string; kind?: string } = {};
-      if (m.color) match.color = validate(m.color, schema.colors) ?? undefined;
-      if (m.size) match.size = validate(m.size, schema.sizes) ?? undefined;
-      if (m.kind) match.kind = validate(m.kind, schema.kinds) ?? undefined;
-      const hasMatch = !!(match.color || match.size || match.kind);
+    case 'update_position': {
+      const idx = typeof args.positionIndex === 'number' ? args.positionIndex : NaN;
+      if (!Number.isFinite(idx) || idx < 1) return { intent: 'unclear', reason: 'Не указан positionIndex' };
       const newColor = validate(args.newColor, schema.colors);
       const newSize = validate(args.newSize, schema.sizes);
       const newKind = validate(args.newKind, schema.kinds);
       const newQty = typeof args.newQty === 'number' ? args.newQty : undefined;
-      const splitQty = typeof args.splitQty === 'number' ? args.splitQty : undefined;
       if (!newColor && !newSize && !newKind && newQty === undefined) {
-        return { intent: 'unclear', reason: 'Не указано на что менять (цвет/размер/вид/кол-во)' };
+        return { intent: 'unclear', reason: 'Не указано что менять у позиции' };
       }
-      if (splitQty !== undefined && !hasMatch) {
-        return { intent: 'unclear', reason: 'Для split нужен match (откуда переносим)' };
-      }
-      return {
-        intent: 'update_positions',
-        phone,
-        match: hasMatch ? match : undefined,
-        newColor, newSize, newKind, newQty, splitQty,
-      };
+      return { intent: 'update_position', phone, positionIndex: idx, newColor, newSize, newKind, newQty };
     }
     case 'add_position': {
       const color = validate(args.color, schema.colors);
@@ -291,20 +260,19 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       const kind = validate(args.kind, schema.kinds);
       const qty = typeof args.qty === 'number' ? args.qty : undefined;
       if (!color || !size || !kind || !qty) {
-        return { intent: 'unclear', reason: 'Не хватает данных для новой позиции (цвет/размер/вид/кол-во)' };
+        return { intent: 'unclear', reason: 'Не хватает данных для add_position' };
       }
       return { intent: 'add_position', phone, color, size, kind, qty };
     }
+    case 'delete_position': {
+      const idx = typeof args.positionIndex === 'number' ? args.positionIndex : NaN;
+      if (!Number.isFinite(idx) || idx < 1) return { intent: 'unclear', reason: 'Не указан positionIndex' };
+      return { intent: 'delete_position', phone, positionIndex: idx };
+    }
     case 'show_client': {
-      if (!phone) return { intent: 'unclear', reason: 'Не указан телефон клиента' };
+      if (!phone) return { intent: 'unclear', reason: 'Не указан телефон' };
       const mode = args.mode === 'receipt' ? 'receipt' : 'card';
       return { intent: 'show_client', phone, mode };
-    }
-    case 'show_timeline': {
-      if (!args.startDate || !args.endDate) {
-        return { intent: 'unclear', reason: 'Не указан период для таймлайна' };
-      }
-      return { intent: 'show_timeline', startDate: args.startDate, endDate: args.endDate };
     }
     case 'show_orders': {
       const r: AIIntent = { intent: 'show_orders' };
@@ -313,9 +281,15 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       if (typeof args.limit === 'number') r.limit = args.limit;
       if (typeof args.status === 'string') r.status = args.status;
       if (!r.startDate && !r.endDate && !r.limit) {
-        return { intent: 'unclear', reason: 'Не указан период или количество заказов' };
+        return { intent: 'unclear', reason: 'Не указан период' };
       }
       return r;
+    }
+    case 'show_timeline': {
+      if (!args.startDate || !args.endDate) {
+        return { intent: 'unclear', reason: 'Не указан период для таймлайна' };
+      }
+      return { intent: 'show_timeline', startDate: args.startDate, endDate: args.endDate };
     }
     case 'unclear':
     default:
