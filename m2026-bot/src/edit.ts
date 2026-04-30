@@ -1,7 +1,7 @@
 import { Context, InlineKeyboard } from 'grammy';
 import { Client as NotionClient } from '@notionhq/client';
 import { getSchema } from './schema';
-import { parseIntent, AIIntent, formatUsage, Usage } from './ai';
+import { parseIntent, AIIntent, formatUsage, Usage, ChatMsg, extractPhoneFromText } from './ai';
 import {
   findClientsByPhone,
   updateClientPage,
@@ -282,6 +282,108 @@ async function handleShowTimeline(ctx: Context, env: Env, startISO: string, endI
   }
 }
 
+async function handleUpdatePositions(
+  ctx: Context,
+  env: Env,
+  client: FoundClient,
+  intent: Extract<AIIntent, { intent: 'update_positions' }>,
+  usageLine?: string,
+): Promise<void> {
+  const userId = ctx.from!.id;
+  if (client.positions.length === 0) {
+    await ctx.reply(`❌ У клиента ${client.phone} нет позиций.`);
+    return;
+  }
+  const matched = intent.match
+    ? matchPositions(client.positions, intent.match)
+    : client.positions.slice();
+  if (matched.length === 0) {
+    await ctx.reply(`❌ Не нашёл позиции по фильтру: ${formatPos(intent.match ?? {})}`);
+    return;
+  }
+
+  // Split-режим: одна исходная позиция, отщепляем splitQty
+  if (intent.splitQty && intent.splitQty > 0) {
+    if (matched.length > 1) {
+      // показать picker
+      const session = emptySession();
+      session.step = 'edit_pick_position';
+      session.positionCandidates = matched.map(m => ({ positionPageId: m.pageId, label: formatPos(m) }));
+      session.pendingChange = {
+        type: 'update_positions',
+        phone: client.phone,
+        match: intent.match ?? {},
+        newColor: intent.newColor,
+        newSize: intent.newSize,
+        newKind: intent.newKind,
+        splitQty: intent.splitQty,
+      };
+      session.selectedPageId = client.pageId;
+      await saveSession(env.kv, userId, session);
+      const kb = new InlineKeyboard();
+      for (const m of matched) kb.text(`✏ ${formatPos(m)}`, `pickpos:${m.pageId}`).row();
+      kb.text('❌ Отмена', 'pickpos:cancel');
+      await ctx.reply(`Несколько подходящих позиций. Выбери одну:\n\n${formatClient(client)}\n\n${usageLine}`, { reply_markup: kb });
+      return;
+    }
+    const src = matched[0];
+    if ((src.qty ?? 0) < intent.splitQty) {
+      await ctx.reply(`❌ В «${formatPos(src)}» только ${src.qty} шт.`);
+      return;
+    }
+    const target = {
+      color: intent.newColor ?? src.color,
+      size: intent.newSize ?? src.size,
+      kind: intent.newKind ?? src.kind,
+    };
+    const dest = client.positions.find(p =>
+      p.pageId !== src.pageId &&
+      p.color === target.color && p.size === target.size && p.kind === target.kind,
+    );
+    const remaining = (src.qty ?? 0) - intent.splitQty;
+    const ops: PendingOp[] = [];
+    if (remaining === 0) ops.push({ type: 'archive_position', positionPageId: src.pageId });
+    else ops.push({ type: 'update_position', positionPageId: src.pageId, changes: { qty: remaining } });
+    if (dest) {
+      ops.push({ type: 'update_position', positionPageId: dest.pageId, changes: { qty: (dest.qty ?? 0) + intent.splitQty } });
+    } else {
+      if (!target.color || !target.size || !target.kind) {
+        await ctx.reply('❌ Недостаточно данных для целевой позиции.');
+        return;
+      }
+      ops.push({ type: 'add_position', pos: { color: target.color, size: target.size, kind: target.kind, qty: intent.splitQty } });
+    }
+    const srcAfter = remaining === 0 ? '(удалить)' : `${formatPos(src)} → ×${remaining}`;
+    const destAfter = dest
+      ? `${formatPos(dest)} → ×${(dest.qty ?? 0) + intent.splitQty}`
+      : `создать ${target.color} ${target.size} ${target.kind} ×${intent.splitQty}`;
+    const desc = `✏ Разделить ${intent.splitQty} шт:\n  • было: ${formatPos(src)}\n  • станет: ${srcAfter}\n  • перенос: ${destAfter}`;
+    return saveAndPrompt(ctx, env, client, desc, usageLine, ops);
+  }
+
+  // Обычный режим: применяем set-поля ко всем matched
+  const changes: Record<string, any> = {};
+  if (intent.newColor) changes.color = intent.newColor;
+  if (intent.newSize) changes.size = intent.newSize;
+  if (intent.newKind) changes.kind = intent.newKind;
+  if (typeof intent.newQty === 'number') changes.qty = intent.newQty;
+  const ops: PendingOp[] = matched.map(p => ({
+    type: 'update_position', positionPageId: p.pageId, changes,
+  }));
+
+  const fields = [
+    intent.newColor && `цвет → ${intent.newColor}`,
+    intent.newSize && `размер → ${intent.newSize}`,
+    intent.newKind && `вид → ${intent.newKind}`,
+    typeof intent.newQty === 'number' && `кол-во → ${intent.newQty}`,
+  ].filter(Boolean).join(', ');
+  const scope = intent.match
+    ? `по фильтру (${matched.length})`
+    : `все (${matched.length})`;
+  const desc = `✏ Позиции ${scope}: ${fields}`;
+  return saveAndPrompt(ctx, env, client, desc, usageLine, ops);
+}
+
 function matchPositions(positions: FoundPosition[], match: { color?: string; size?: string; kind?: string }): FoundPosition[] {
   return positions.filter(p =>
     (!match.color || p.color === match.color) &&
@@ -290,22 +392,77 @@ function matchPositions(positions: FoundPosition[], match: { color?: string; siz
   );
 }
 
-export async function handleAIMessage(ctx: Context, env: Env, text: string): Promise<void> {
-  let intent: AIIntent;
-  let usage: Usage;
-  try {
-    const schema = await getSchema(env.notion, env.kv);
-    const r = await parseIntent(env.anthropicKey, text, schema);
-    intent = r.intent;
-    usage = r.usage;
-  } catch (err: any) {
-    await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
-    return;
+const THREAD_TTL_MS = 5 * 60 * 1000;
+
+function buildClientContext(c: FoundClient): string {
+  const lines: string[] = [];
+  lines.push(`Телефон: ${c.phone}`);
+  if (c.school) lines.push(`Школа: ${c.school}`);
+  if (c.date) lines.push(`Дата выдачи: ${c.date}`);
+  if (c.status) lines.push(`Статус: ${c.status}`);
+  if (typeof c.price === 'number') lines.push(`Цена: ${c.price}`);
+  if (typeof c.paid === 'number') lines.push(`Оплачено: ${c.paid}`);
+  if (typeof c.discount === 'number') lines.push(`Скидка: ${c.discount}`);
+  if (c.note) lines.push(`Примечание: ${c.note}`);
+  if (c.positions.length) {
+    lines.push(`Позиции (${c.positions.length}):`);
+    for (const p of c.positions) {
+      lines.push(`  - ${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`);
+    }
   }
-  return handleParsedIntent(ctx, env, intent, formatUsage(usage));
+  return lines.join('\n');
 }
 
-export async function handleParsedIntent(ctx: Context, env: Env, intent: AIIntent, usageLine: string): Promise<void> {
+export async function handleAIMessage(ctx: Context, env: Env, text: string): Promise<void> {
+  const userId = ctx.from!.id;
+  const session = await getSession(env.kv, userId);
+  const thread = session.aiThread;
+  const history: ChatMsg[] = thread && thread.expiresAt > Date.now() ? thread.messages : [];
+
+  try {
+    const schema = await getSchema(env.notion, env.kv);
+
+    // Pre-fetch: только при старте треда (чтобы не дёргать Notion на каждое уточнение)
+    let prefetchedClient: FoundClient | undefined;
+    let clientContext: string | undefined;
+    if (history.length === 0) {
+      const phone = extractPhoneFromText(text);
+      if (phone) {
+        const candidates = await findClientsByPhone(env.notion, phone);
+        if (candidates.length === 1) {
+          prefetchedClient = candidates[0];
+          clientContext = buildClientContext(prefetchedClient);
+        }
+      }
+    }
+
+    const r = await parseIntent(env.anthropicKey, text, schema, history, clientContext);
+    const usageLine = formatUsage(r.usage);
+
+    if (r.kind === 'question') {
+      const newMessages: ChatMsg[] = [
+        ...history,
+        { role: 'user', content: text },
+        { role: 'assistant', content: r.text },
+      ];
+      session.aiThread = { messages: newMessages, expiresAt: Date.now() + THREAD_TTL_MS };
+      await saveSession(env.kv, userId, session);
+      await ctx.reply(`💬 ${r.text}\n\n${usageLine}`);
+      return;
+    }
+
+    // intent — чистим thread
+    if (session.aiThread) {
+      delete session.aiThread;
+      await saveSession(env.kv, userId, session);
+    }
+    return handleParsedIntent(ctx, env, r.intent, usageLine, prefetchedClient);
+  } catch (err: any) {
+    await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
+  }
+}
+
+export async function handleParsedIntent(ctx: Context, env: Env, intent: AIIntent, usageLine: string, prefetched?: FoundClient): Promise<void> {
   if (intent.intent === 'unclear') {
     await ctx.reply(`🤔 Не понял: ${intent.reason}\n\n${usageLine}`);
     return;
@@ -338,16 +495,22 @@ export async function handleParsedIntent(ctx: Context, env: Env, intent: AIInten
     return;
   }
 
-  const clients = await findClientsByPhone(env.notion, intent.phone);
-  if (clients.length === 0) {
-    await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.\n\n${usageLine}`);
-    return;
+  let client: FoundClient;
+  if (prefetched && prefetched.phone.replace(/\D/g, '').endsWith(intent.phone.replace(/\D/g, ''))) {
+    client = prefetched;
+  } else {
+    const clients = await findClientsByPhone(env.notion, intent.phone);
+    if (clients.length === 0) {
+      await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.\n\n${usageLine}`);
+      return;
+    }
+    if (clients.length > 1) {
+      await ctx.reply(`❌ Найдено несколько клиентов (${clients.length}) с похожим номером. Уточни.\n\n${usageLine}`);
+      return;
+    }
+    client = clients[0];
   }
-  if (clients.length > 1) {
-    await ctx.reply(`❌ Найдено несколько клиентов (${clients.length}) с похожим номером. Уточни.\n\n${usageLine}`);
-    return;
-  }
-  await prepareEdit(ctx, env, clients[0], intent, usageLine);
+  await prepareEdit(ctx, env, client, intent, usageLine);
 }
 
 async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: AIIntent, usageLine?: string): Promise<void> {
@@ -392,121 +555,10 @@ async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: 
         { type: 'add_position', pos: { color: intent.color, size: intent.size, kind: intent.kind, qty: intent.qty } },
       ]);
     }
-    case 'split_position': {
-      const sources = matchPositions(client.positions, intent.positionMatch);
-      if (sources.length === 0) {
-        await ctx.reply(`❌ Не нашёл позицию для деления: ${formatPos(intent.positionMatch)}`);
-        return;
-      }
-      if (sources.length > 1) {
-        await ctx.reply(`❌ Несколько подходящих позиций (${sources.length}). Уточни цвет/размер/вид.`);
-        return;
-      }
-      const src = sources[0];
-      if ((src.qty ?? 0) < intent.qty) {
-        await ctx.reply(`❌ В позиции «${formatPos(src)}» только ${src.qty} шт. Нельзя забрать ${intent.qty}.`);
-        return;
-      }
-      const target = {
-        color: intent.newColor ?? src.color,
-        size: intent.newSize ?? src.size,
-        kind: intent.newKind ?? src.kind,
-      };
-      // ищем существующую позицию того же клиента которая совпадает с target по всем 3 полям
-      const dest = client.positions.find(p =>
-        p.pageId !== src.pageId &&
-        p.color === target.color &&
-        p.size === target.size &&
-        p.kind === target.kind,
-      );
-      const remaining = (src.qty ?? 0) - intent.qty;
-      const ops: PendingOp[] = [];
-      if (remaining === 0) {
-        ops.push({ type: 'archive_position', positionPageId: src.pageId });
-      } else {
-        ops.push({ type: 'update_position', positionPageId: src.pageId, changes: { qty: remaining } });
-      }
-      if (dest) {
-        ops.push({ type: 'update_position', positionPageId: dest.pageId, changes: { qty: (dest.qty ?? 0) + intent.qty } });
-      } else {
-        if (!target.color || !target.size || !target.kind) {
-          await ctx.reply('❌ Недостаточно данных для целевой позиции.');
-          return;
-        }
-        ops.push({ type: 'add_position', pos: { color: target.color, size: target.size, kind: target.kind, qty: intent.qty } });
-      }
-      const srcAfter = remaining === 0 ? '(удалить)' : `${formatPos(src)} → ×${remaining}`;
-      const destAfter = dest
-        ? `${formatPos(dest)} → ×${(dest.qty ?? 0) + intent.qty}`
-        : `создать ${target.color} ${target.size} ${target.kind} ×${intent.qty}`;
-      const desc = `✏ Разделить ${intent.qty} шт:\n  • было: ${formatPos(src)}\n  • станет: ${srcAfter}\n  • перенос: ${destAfter}`;
-      return saveAndPrompt(ctx, env, client, desc, usageLine, ops);
-    }
-
-    case 'change_position': {
-      const matches = matchPositions(client.positions, intent.positionMatch);
-      if (matches.length === 0) {
-        await ctx.reply(`❌ Не нашёл позицию для изменения: ${formatPos(intent.positionMatch)}`);
-        return;
-      }
-      if (matches.length > 1) {
-        // несколько подходят — список выбора
-        const session = emptySession();
-        session.step = 'edit_pick_position';
-        session.positionCandidates = matches.map(m => ({
-          positionPageId: m.pageId,
-          label: formatPos(m),
-        }));
-        session.pendingChange = {
-          type: 'change_position',
-          phone: client.phone,
-          match: intent.positionMatch,
-          newColor: intent.newColor,
-          newSize: intent.newSize,
-          newKind: intent.newKind,
-          newQty: intent.newQty,
-        };
-        session.selectedPageId = client.pageId;
-        await saveSession(env.kv, userId, session);
-        const kb = new InlineKeyboard();
-        for (const m of matches) {
-          kb.text(`✏ ${formatPos(m)}`, `pickpos:${m.pageId}`).row();
-        }
-        kb.text('❌ Отмена', 'pickpos:cancel');
-        await ctx.reply(
-          `Найдено несколько подходящих позиций. Выбери какую менять:\n\n${formatClient(client)}`,
-          { reply_markup: kb },
-        );
-        return;
-      }
-      const pos = matches[0];
-      const desc = buildChangePosDesc(pos, intent);
-      const changes = buildChangePosChanges(intent);
-      return saveAndPrompt(ctx, env, client, desc, usageLine, [
-        { type: 'update_position', positionPageId: pos.pageId, changes },
-      ]);
+    case 'update_positions': {
+      return handleUpdatePositions(ctx, env, client, intent, usageLine);
     }
   }
-}
-
-function buildChangePosDesc(pos: FoundPosition, intent: Extract<AIIntent, { intent: 'change_position' }>): string {
-  const before = formatPos(pos);
-  const after = formatPos({
-    color: intent.newColor ?? pos.color,
-    size: intent.newSize ?? pos.size,
-    kind: intent.newKind ?? pos.kind,
-    qty: intent.newQty ?? pos.qty,
-  });
-  return `✏ Позиция: ${before} → ${after}`;
-}
-
-function buildChangePosChanges(intent: Extract<AIIntent, { intent: 'change_position' }>): Record<string, any> {
-  const c: Record<string, any> = {};
-  if (intent.newColor) c.color = intent.newColor;
-  if (intent.newSize) c.size = intent.newSize;
-  if (intent.newKind) c.kind = intent.newKind;
-  if (intent.newQty !== undefined) c.qty = intent.newQty;
-  return c;
 }
 
 async function saveAndPrompt(
@@ -576,7 +628,7 @@ export async function pickPosition(ctx: Context, env: Env, positionPageId: strin
   const session = await getSession(env.kv, userId);
   const pc = session.pendingChange;
   const candidates = session.positionCandidates ?? [];
-  if (!pc || pc.type !== 'change_position' || !session.selectedPageId) {
+  if (!pc || pc.type !== 'update_positions' || !session.selectedPageId) {
     await ctx.reply('Сессия истекла.');
     await clearSession(env.kv, userId);
     return;
@@ -593,24 +645,24 @@ export async function pickPosition(ctx: Context, env: Env, positionPageId: strin
     return;
   }
   const client = clients[0];
+  const intent: Extract<AIIntent, { intent: 'update_positions' }> = {
+    intent: 'update_positions',
+    phone: pc.phone,
+    // фильтр сужаем до конкретной позиции через её атрибуты — после picker мы знаем точный pageId
+    match: { color: undefined, size: undefined, kind: undefined },
+    newColor: pc.newColor,
+    newSize: pc.newSize,
+    newKind: pc.newKind,
+    newQty: pc.newQty,
+    splitQty: pc.splitQty,
+  };
+  // ограничиваем positions до выбранной — переопределяем client locally
   const pos = client.positions.find(p => p.pageId === positionPageId);
   if (!pos) {
     await ctx.reply('Позиция не найдена.');
     await clearSession(env.kv, userId);
     return;
   }
-  const intent: Extract<AIIntent, { intent: 'change_position' }> = {
-    intent: 'change_position',
-    phone: pc.phone,
-    positionMatch: pc.match,
-    newColor: pc.newColor,
-    newSize: pc.newSize,
-    newKind: pc.newKind,
-    newQty: pc.newQty,
-  };
-  const desc = buildChangePosDesc(pos, intent);
-  const changes = buildChangePosChanges(intent);
-  return saveAndPrompt(ctx, env, client, desc, undefined, [
-    { type: 'update_position', positionPageId: pos.pageId, changes },
-  ]);
+  const localClient: FoundClient = { ...client, positions: [pos] };
+  return handleUpdatePositions(ctx, env, localClient, { ...intent, match: undefined }, '');
 }

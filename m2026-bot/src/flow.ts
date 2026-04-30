@@ -3,8 +3,7 @@ import { Client as NotionClient } from '@notionhq/client';
 import { Session, getSession, saveSession, clearSession, emptySession, DraftPosition, DraftClient } from './session';
 import { getSchema, Schema } from './schema';
 import { createClientWithPositions, searchClients, searchClientsByDateRange, updateClientStatus, archiveClient, loadClientPositions, updateClientFull, getClient, ClientSummary } from './notion';
-import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition, handleParsedIntent } from './edit';
-import { parseIntent, formatUsage } from './ai';
+import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition } from './edit';
 import { transcribeAudio, LOW_CONFIDENCE_THRESHOLD } from './voice';
 
 type Env = {
@@ -187,9 +186,8 @@ export async function handleVoice(ctx: Context, env: Env): Promise<void> {
       : `🎤 Распознано: ${text}`;
     await ctx.reply(recognizedMsg);
 
-    // Шаг 2: текст → intent через Claude
-    const { intent, usage } = await parseIntent(env.anthropicKey, text, schema);
-    return handleParsedIntent(ctx, env, intent, formatUsage(usage));
+    // Шаг 2: текст → AI с поддержкой треда (через handleAIMessage)
+    return handleAIMessage(ctx, env, text);
   } catch (err: any) {
     if (listening) {
       await ctx.api.deleteMessage(listening.chat.id, listening.message_id).catch(() => {});

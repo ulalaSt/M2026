@@ -7,24 +7,19 @@ export type AIIntent =
   | { intent: 'change_note'; phone: string; note: string }
   | { intent: 'change_school'; phone: string; newSchool: string }
   | {
-      intent: 'change_position';
+      intent: 'update_positions';
       phone: string;
-      positionMatch: { color?: string; size?: string; kind?: string };
+      // match отсутствует или пустой → применить ко ВСЕМ позициям клиента
+      match?: { color?: string; size?: string; kind?: string };
+      // что изменить
       newColor?: string;
       newSize?: string;
       newKind?: string;
       newQty?: number;
+      // если указан splitQty — отщепить N штук с найденной позиции (split)
+      splitQty?: number;
     }
   | { intent: 'add_position'; phone: string; color: string; size: string; kind: string; qty: number }
-  | {
-      intent: 'split_position';
-      phone: string;
-      positionMatch: { color?: string; size?: string; kind?: string };
-      qty: number;
-      newColor?: string;
-      newSize?: string;
-      newKind?: string;
-    }
   | { intent: 'show_client'; phone: string; mode?: 'card' | 'receipt' }
   | { intent: 'show_orders'; startDate?: string; endDate?: string; limit?: number; status?: string }
   | { intent: 'show_timeline'; startDate: string; endDate: string }
@@ -38,7 +33,7 @@ const TOOL = {
     properties: {
       intent: {
         type: 'string',
-        enum: ['change_date', 'change_status', 'change_payment', 'change_note', 'change_school', 'change_position', 'add_position', 'split_position', 'show_client', 'show_orders', 'show_timeline', 'unclear'],
+        enum: ['change_date', 'change_status', 'change_payment', 'change_note', 'change_school', 'update_positions', 'add_position', 'show_client', 'show_orders', 'show_timeline', 'unclear'],
         description: 'Тип действия',
       },
       phone: { type: 'string', description: 'Телефон клиента или пустая строка если не указан' },
@@ -47,14 +42,16 @@ const TOOL = {
       addPaid: { type: 'number', description: 'Сколько добавить к оплате' },
       setPaid: { type: 'number', description: 'Установить оплачено в это значение' },
       note: { type: 'string', description: 'Текст примечания' },
-      positionMatch: {
+      match: {
         type: 'object',
+        description: 'Фильтр позиций для update_positions. Пусто/отсутствует = все позиции клиента.',
         properties: {
           color: { type: 'string' },
           size: { type: 'string' },
           kind: { type: 'string' },
         },
       },
+      splitQty: { type: 'number', description: 'Сколько штук отщепить (split). Если указан — берётся одна позиция по match и из неё переносится N штук в новую с set.' },
       newColor: { type: 'string' },
       newSize: { type: 'string' },
       newKind: { type: 'string' },
@@ -110,8 +107,14 @@ function buildSystemPrompt(schema: Schema): string {
 
 Правила действий:
 - "добавь N" / каз. "қос/қосу N" → add_position с qty=N
-- "поменяй <старое> на <новое>" / каз. "<старое>-ны <новое>-ға ауыстыр" БЕЗ количества → change_position
-- "поменяй N <старое> на <новое>" / "перенеси N" / "разбей N" / каз. "N <старое>-ны <новое>-ға ауыстыр" → split_position. positionMatch — откуда, newX — что меняется, qty — сколько.
+- update_positions — универсальное обновление позиций:
+  - "все позиции на M" / "сделай всех Взрослыми" → match отсутствует, newSize='M' (или newKind='Взрослый')
+  - "поменяй M на L" → match={size:'M'}, newSize='L'
+  - "поменяй зелёный на красный" → match={color:'🟢 зелёный'}, newColor='🔴 красный'
+  - "поменяй кол-во M на 10" → match={size:'M'}, newQty=10
+  - "перенеси N M на S" / "разбей N зелёный на красный" → match={size:'M'}, newSize='S', splitQty=N
+  - newQty в обычном режиме (без splitQty) ставит количество для всех найденных
+  - splitQty — отщепляет N штук из ОДНОЙ найденной позиции и переносит в новую с указанными изменениями
 - "перенеси на <дата>" / "поменяй дату" / каз. "<дата>-ға ауыстыр / көшір" → change_date (формат YYYY-MM-DD)
 - "школа <X>" / "это тоже <X>" / "уч.заведение <X>" / каз. "мектеп <X>" → change_school. newSchool — выбирай ближайшее из schools (можно по части названия).
 
@@ -124,8 +127,10 @@ Read-only запросы:
 - "первые N заказов" / "ближайшие N заказов" / "следующие N" → show_orders с startDate=сегодня, limit=N
 - "таймлайн" / "календарь на месяц" / "по дням" / "визуально по датам" → show_timeline. startDate/endDate обязательны (если месяц — 30 дней от сегодня).
 - Запросы read-only НЕ требуют подтверждения — выполняются сразу.
-- Телефон может быть полным (87771112233, +77771112233) или последними 4-7 цифрами (например "2233", "112233"). Передавай как есть в phone — поиск сам найдёт.
-- Если телефон не указан вообще — phone=""
+- ВАЖНО: клиенты идентифицируются ТОЛЬКО по телефону. Любые цифры от 4 до 11 длиной упомянутые в команде — это телефон или его последние цифры. Никаких "номеров заказа" / "ID клиента" / "номеров заявки" не существует — это всё телефон.
+- "по 5566", "на заказе 5566", "у клиента 5566", "5566 ...", "клиент 1234" → phone="5566" (или "1234" — передавай цифры как есть, поиск найдёт по последним цифрам)
+- Телефон может быть полным (87771112233, +77771112233) или последними 4-7 цифрами ("2233", "112233"). Передавай как есть в phone.
+- Если в команде вообще нет цифр-идентификатора — phone=""
 - Используй ТОЛЬКО значения из списков выше. Никогда не придумывай новых статусов/цветов/размеров/видов.
 - Если непонятно или не хватает данных — intent=unclear с reason.`;
 }
@@ -147,15 +152,39 @@ export function formatUsage(u: Usage): string {
   return `💸 Запрос: ${u.inputTokens} in + ${u.outputTokens} out = $${usd.toFixed(4)} (~${kzt.toFixed(2)} ₸)`;
 }
 
-export async function parseIntent(apiKey: string, userMessage: string, schema: Schema): Promise<AIResult> {
+export type ChatMsg = { role: 'user' | 'assistant'; content: string };
+
+/** Извлекает «телефонную» строку из произвольного текста. Любая последовательность 4+ цифр. */
+export function extractPhoneFromText(text: string): string | null {
+  const m = text.match(/(\+?\d[\d\s\-()]{3,}\d)/);
+  if (!m) return null;
+  const digits = m[1].replace(/\D/g, '');
+  return digits.length >= 4 ? digits : null;
+}
+
+export type ParseResult =
+  | { kind: 'intent'; intent: AIIntent; usage: Usage }
+  | { kind: 'question'; text: string; usage: Usage };
+
+export async function parseIntent(
+  apiKey: string,
+  userMessage: string,
+  schema: Schema,
+  history: ChatMsg[] = [],
+  clientContext?: string,
+): Promise<ParseResult> {
+  const messages = [...history, { role: 'user', content: userMessage }];
+  let system = buildSystemPrompt(schema) + '\n\nЕсли в запросе не хватает данных или есть неоднозначность — задай уточняющий вопрос текстом (одно предложение, по делу). Если данных достаточно — сразу вызови register_intent. Не вызывай register_intent с intent=unclear — лучше задай вопрос.';
+  if (clientContext) {
+    system += '\n\n=== АКТУАЛЬНЫЕ ДАННЫЕ КЛИЕНТА (используй их вместо вопросов про позиции) ===\n' + clientContext;
+  }
   const body = {
     model: 'claude-haiku-4-5',
     max_tokens: 500,
     temperature: 0,
-    system: buildSystemPrompt(schema),
+    system,
     tools: [TOOL],
-    tool_choice: { type: 'tool', name: 'register_intent' },
-    messages: [{ role: 'user', content: userMessage }],
+    messages,
   };
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -176,11 +205,13 @@ export async function parseIntent(apiKey: string, userMessage: string, schema: S
     outputTokens: json?.usage?.output_tokens ?? 0,
     model: 'haiku',
   };
-  const block = (json?.content ?? []).find((c: any) => c.type === 'tool_use' && c.name === 'register_intent');
-  if (!block) {
-    return { intent: { intent: 'unclear', reason: 'Не удалось распознать намерение' }, usage };
+  const blocks = json?.content ?? [];
+  const tool = blocks.find((c: any) => c.type === 'tool_use' && c.name === 'register_intent');
+  if (tool) {
+    return { kind: 'intent', intent: mapToIntent(tool.input ?? {}, schema), usage };
   }
-  return { intent: mapToIntent(block.input ?? {}, schema), usage };
+  const text = blocks.find((c: any) => c.type === 'text');
+  return { kind: 'question', text: (text?.text ?? 'Что-то не понял, уточни.').trim(), usage };
 }
 
 
@@ -229,24 +260,30 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       if (!school) return { intent: 'unclear', reason: `Неизвестное уч. заведение: ${args.newSchool}` };
       return { intent: 'change_school', phone, newSchool: school };
     }
-    case 'change_position': {
-      const m = args.positionMatch ?? {};
-      const match = {
-        color: validate(m.color, schema.colors),
-        size: validate(m.size, schema.sizes),
-        kind: validate(m.kind, schema.kinds),
-      };
+    case 'update_positions': {
+      const m = args.match ?? args.positionMatch ?? {};
+      const match: { color?: string; size?: string; kind?: string } = {};
+      if (m.color) match.color = validate(m.color, schema.colors) ?? undefined;
+      if (m.size) match.size = validate(m.size, schema.sizes) ?? undefined;
+      if (m.kind) match.kind = validate(m.kind, schema.kinds) ?? undefined;
+      const hasMatch = !!(match.color || match.size || match.kind);
       const newColor = validate(args.newColor, schema.colors);
       const newSize = validate(args.newSize, schema.sizes);
       const newKind = validate(args.newKind, schema.kinds);
       const newQty = typeof args.newQty === 'number' ? args.newQty : undefined;
-      if (!match.color && !match.size && !match.kind) {
-        return { intent: 'unclear', reason: 'Не указано какую позицию менять' };
-      }
+      const splitQty = typeof args.splitQty === 'number' ? args.splitQty : undefined;
       if (!newColor && !newSize && !newKind && newQty === undefined) {
-        return { intent: 'unclear', reason: 'Не указано на что менять' };
+        return { intent: 'unclear', reason: 'Не указано на что менять (цвет/размер/вид/кол-во)' };
       }
-      return { intent: 'change_position', phone, positionMatch: match, newColor, newSize, newKind, newQty };
+      if (splitQty !== undefined && !hasMatch) {
+        return { intent: 'unclear', reason: 'Для split нужен match (откуда переносим)' };
+      }
+      return {
+        intent: 'update_positions',
+        phone,
+        match: hasMatch ? match : undefined,
+        newColor, newSize, newKind, newQty, splitQty,
+      };
     }
     case 'add_position': {
       const color = validate(args.color, schema.colors);
@@ -257,28 +294,6 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
         return { intent: 'unclear', reason: 'Не хватает данных для новой позиции (цвет/размер/вид/кол-во)' };
       }
       return { intent: 'add_position', phone, color, size, kind, qty };
-    }
-    case 'split_position': {
-      const m = args.positionMatch ?? {};
-      const match = {
-        color: validate(m.color, schema.colors),
-        size: validate(m.size, schema.sizes),
-        kind: validate(m.kind, schema.kinds),
-      };
-      const newColor = validate(args.newColor, schema.colors);
-      const newSize = validate(args.newSize, schema.sizes);
-      const newKind = validate(args.newKind, schema.kinds);
-      const qty = typeof args.qty === 'number' ? args.qty : undefined;
-      if (!match.color && !match.size && !match.kind) {
-        return { intent: 'unclear', reason: 'Не указано какую позицию делить' };
-      }
-      if (!newColor && !newSize && !newKind) {
-        return { intent: 'unclear', reason: 'Не указано на что менять часть позиции' };
-      }
-      if (!qty || qty <= 0) {
-        return { intent: 'unclear', reason: 'Не указано сколько штук переносить' };
-      }
-      return { intent: 'split_position', phone, positionMatch: match, qty, newColor, newSize, newKind };
     }
     case 'show_client': {
       if (!phone) return { intent: 'unclear', reason: 'Не указан телефон клиента' };

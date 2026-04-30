@@ -77,13 +77,14 @@ export type PendingEdit = {
 };
 
 export type PendingChange = {
-  type: 'change_position';
+  type: 'update_positions';
   phone: string;
   match: { color?: string; size?: string; kind?: string };
   newColor?: string;
   newSize?: string;
   newKind?: string;
   newQty?: number;
+  splitQty?: number;
 };
 
 export type Session = {
@@ -97,6 +98,10 @@ export type Session = {
   pendingEdit?: PendingEdit;
   positionCandidates?: { positionPageId: string; label: string }[];
   pendingChange?: PendingChange;
+  aiThread?: {
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    expiresAt: number;
+  };
 };
 
 const EMPTY_DRAFT: DraftClient = { positions: [] };

@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { DraftPosition, Schema } from '../types';
+import { colorClass } from '../App';
 
 type Props = {
   schema: Schema;
@@ -7,14 +8,29 @@ type Props = {
   onClose: () => void;
 };
 
+function stripEmoji(s: string): string {
+  return s.replace(/^\S+\s*/, '').trim() || s;
+}
+
 export function PositionModal({ schema, onAdd, onClose }: Props) {
   const [color, setColor] = useState<string>('');
   const [size, setSize] = useState<string>('');
   const [kind, setKind] = useState<string>('');
   const [qtyStr, setQtyStr] = useState<string>('1');
+  const [open, setOpen] = useState(false);
+
+  // animate-in
+  useEffect(() => {
+    requestAnimationFrame(() => setOpen(true));
+  }, []);
 
   const qty = parseInt(qtyStr, 10);
   const ready = !!(color && size && kind && Number.isFinite(qty) && qty > 0);
+
+  function close() {
+    setOpen(false);
+    setTimeout(onClose, 300);
+  }
 
   function submit() {
     if (!ready) return;
@@ -22,106 +38,68 @@ export function PositionModal({ schema, onAdd, onClose }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
-         onClick={onClose}>
-      <div onClick={e => e.stopPropagation()}
-        className="w-full sm:max-w-md bg-tg-bg rounded-t-3xl sm:rounded-3xl shadow-2xl max-h-[92vh] overflow-y-auto">
-        {/* Drag handle */}
-        <div className="sm:hidden flex justify-center pt-3 pb-1">
-          <div className="w-10 h-1 rounded-full bg-tg-hint/40" />
-        </div>
+    <div className={`modal-overlay ${open ? 'open' : ''}`} onClick={close}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-handle" />
+        <h2 className="modal-title">Новая <em>позиция</em></h2>
+        <div className="modal-sub">Выберите параметры товара</div>
 
-        <div className="p-5 pt-2 sm:pt-5 space-y-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-bold">Новая позиция</h2>
-            <button onClick={onClose}
-              className="w-9 h-9 rounded-full bg-tg-secondary-bg text-xl flex items-center justify-center active:scale-90 transition-transform">×</button>
+        <div className="group">
+          <div className="group-label">Цвет</div>
+          <div className="chip-row">
+            {schema.colors.map(c => (
+              <button key={c} className={`chip ${color === c ? 'active' : ''}`}
+                onClick={() => setColor(c)}>
+                <span className={`swatch-mini ${colorClass(c)}`} />
+                {stripEmoji(c)}
+              </button>
+            ))}
           </div>
-
-          <Section title="Цвет" required={!color}>
-            <div className="flex flex-wrap gap-2">
-              {schema.colors.map(c => {
-                const emoji = c.split(/\s/)[0];
-                const name = c.split(/\s/).slice(1).join(' ') || c;
-                const active = color === c;
-                return (
-                  <button key={c} onClick={() => setColor(c)}
-                    className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium transition-all ${active
-                      ? 'bg-tg-button text-tg-button-text shadow-sm'
-                      : 'bg-tg-secondary-bg text-tg-text active:scale-95'}`}>
-                    <span className="text-base">{emoji}</span>
-                    <span>{name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </Section>
-
-          <Section title="Размер" required={!size}>
-            <div className="grid grid-cols-3 gap-2">
-              {schema.sizes.map(s => {
-                const active = size === s;
-                return (
-                  <button key={s} onClick={() => setSize(s)}
-                    className={`py-3 rounded-xl text-base font-semibold transition-all ${active
-                      ? 'bg-tg-button text-tg-button-text shadow-sm'
-                      : 'bg-tg-secondary-bg text-tg-text active:scale-95'}`}>
-                    {s}
-                  </button>
-                );
-              })}
-            </div>
-          </Section>
-
-          <Section title="Вид" required={!kind}>
-            <div className="grid grid-cols-3 gap-2">
-              {schema.kinds.map(k => {
-                const active = kind === k;
-                return (
-                  <button key={k} onClick={() => setKind(k)}
-                    className={`py-2.5 rounded-xl text-sm font-medium transition-all ${active
-                      ? 'bg-tg-button text-tg-button-text shadow-sm'
-                      : 'bg-tg-secondary-bg text-tg-text active:scale-95'}`}>
-                    {k}
-                  </button>
-                );
-              })}
-            </div>
-          </Section>
-
-          <Section title="Количество">
-            <div className="flex items-center justify-center gap-3">
-              <button onClick={() => setQtyStr(String(Math.max(1, (Number.isFinite(qty) ? qty : 1) - 1)))}
-                className="w-12 h-12 rounded-full bg-tg-secondary-bg text-2xl active:scale-90 transition-transform">−</button>
-              <input type="number" inputMode="numeric" value={qtyStr}
-                onChange={e => setQtyStr(e.target.value)}
-                onBlur={() => { if (!Number.isFinite(qty) || qty < 1) setQtyStr('1'); }}
-                className="w-24 text-center bg-tg-secondary-bg rounded-xl py-3 text-2xl font-bold outline-none" />
-              <button onClick={() => setQtyStr(String((Number.isFinite(qty) ? qty : 0) + 1))}
-                className="w-12 h-12 rounded-full bg-tg-secondary-bg text-2xl active:scale-90 transition-transform">+</button>
-            </div>
-          </Section>
-
-          <button onClick={submit} disabled={!ready}
-            className={`w-full py-4 rounded-2xl font-semibold text-base transition-all ${ready
-              ? 'bg-tg-button text-tg-button-text shadow-md active:scale-[0.98]'
-              : 'bg-tg-secondary-bg text-tg-hint cursor-not-allowed'}`}>
-            {ready ? `Добавить (×${qty})` : 'Выбери все поля'}
-          </button>
         </div>
-      </div>
-    </div>
-  );
-}
 
-function Section({ title, required, children }: { title: string; required?: boolean; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="flex items-center gap-1.5 text-sm font-medium text-tg-hint mb-2">
-        <span>{title}</span>
-        {required && <span className="w-1 h-1 rounded-full bg-tg-destructive" />}
+        <div className="group">
+          <div className="group-label">Размер</div>
+          <div className="size-row">
+            {schema.sizes.map(s => (
+              <button key={s} className={`size-btn ${size === s ? 'active' : ''}`}
+                onClick={() => setSize(s)}>{s}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="group">
+          <div className="group-label">Категория</div>
+          <div className="chip-row">
+            {schema.kinds.map(k => (
+              <button key={k} className={`chip ${kind === k ? 'active' : ''}`}
+                onClick={() => setKind(k)}>{k}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="group">
+          <div className="group-label">Количество</div>
+          <div className="qty-row">
+            <button className="qty-btn"
+              onClick={() => setQtyStr(String(Math.max(1, (Number.isFinite(qty) ? qty : 1) - 1)))}>−</button>
+            <input type="number" inputMode="numeric" className="qty-num" value={qtyStr}
+              onChange={e => setQtyStr(e.target.value)}
+              onBlur={() => { if (!Number.isFinite(qty) || qty < 1) setQtyStr('1'); }} />
+            <button className="qty-btn"
+              onClick={() => setQtyStr(String((Number.isFinite(qty) ? qty : 0) + 1))}>+</button>
+          </div>
+        </div>
+
+        <button className="cta" disabled={!ready} onClick={submit} style={{ marginTop: 12 }}>
+          <span>{ready ? `Добавить — ${qty} шт` : 'Выберите цвет, размер и вид'}</span>
+          {ready && <span className="arrow">→</span>}
+        </button>
+
+        <button className="toggle-extra" onClick={close}
+          style={{ marginTop: 10, marginBottom: 0, justifyContent: 'center' }}>
+          <span>Отмена</span>
+        </button>
       </div>
-      {children}
     </div>
   );
 }
