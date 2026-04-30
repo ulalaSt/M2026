@@ -8,7 +8,7 @@ import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition } fr
 type Env = {
   kv: KVNamespace;
   notion: NotionClient;
-  geminiKey: string;
+  anthropicKey: string;
 };
 
 // --- Утилиты для клавиатур ---
@@ -348,7 +348,8 @@ export async function handleText(ctx: Context, env: Env): Promise<void> {
     }
 
     default: {
-      const normalized = normalizePhone(text);
+      const looksLikePhoneOnly = /^[+\d\s\-()]+$/.test(text);
+      const normalized = looksLikePhoneOnly ? normalizePhone(text) : null;
       if (normalized) {
         const results = await withLoading(ctx, '⏳ Ищу...', () => searchClients(env.notion, normalized));
         if (results.length === 1) {
@@ -1154,6 +1155,6 @@ function whatsappUrl(phone: string): string {
 function normalizePhone(input: string): string | null {
   let digits = input.replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('8')) digits = '7' + digits.slice(1);
-  if (digits.length === 11 && digits.startsWith('7')) return '+' + digits;
-  return null;
+  if (digits.length !== 11 || !digits.startsWith('7')) return null;
+  return `+${digits[0]} ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
 }

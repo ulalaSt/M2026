@@ -5,3 +5,21 @@ compatibility_date = "2025-01-01"
 [[kv_namespaces]]
 binding = "SESSIONS"
 id = "ebfd511e35c341d4a24cc81c2519ef17"
+
+# Прод использует ID баз по умолчанию из config.ts.
+# Можно явно задать через [vars]:
+# [vars]
+# M2026_DATA_SOURCE_ID = "..."
+# POSITIONS_DATA_SOURCE_ID = "..."
+
+# --- DEV окружение ---
+[env.dev]
+name = "m2026-bot-dev"
+
+[[env.dev.kv_namespaces]]
+binding = "SESSIONS"
+id = "e174beabd25d442aa3c74843b1e15733"
+
+[env.dev.vars]
+M2026_DATA_SOURCE_ID = "35264daf-6c5b-81f7-94ea-000bb1cbd93b"
+POSITIONS_DATA_SOURCE_ID = "35264daf-6c5b-81a0-be7e-000bc00aa2b9"

@@ -1,5 +1,5 @@
 import { Client } from '@notionhq/client';
-import { M2026_DATA_SOURCE_ID, POSITIONS_DATA_SOURCE_ID } from './config';
+import { dbIds } from './config';
 import { DraftClient, DraftPosition } from './session';
 
 export type CreatedClient = {
@@ -35,12 +35,12 @@ export async function createClientWithPositions(
   if (typeof draft.discount === 'number') clientProps['СКИДКА'] = { number: draft.discount };
   if (draft.note) clientProps['ПРИМЕЧАНИЕ'] = { rich_text: [{ type: 'text', text: { content: draft.note } }] };
 
-  const clientPage = await createPage(notion, M2026_DATA_SOURCE_ID, clientProps);
+  const clientPage = await createPage(notion, dbIds.m2026, clientProps);
 
   // 2. Создаём позиции параллельно
   const positionPromises = draft.positions
     .filter(p => p.color && p.size && p.kind && p.qty)
-    .map(pos => createPage(notion, POSITIONS_DATA_SOURCE_ID, {
+    .map(pos => createPage(notion, dbIds.positions, {
       'Название': { title: [{ type: 'text', text: { content: '' } }] },
       'Цвет': { select: { name: pos.color } },
       'Размер': { select: { name: pos.size } },
@@ -80,7 +80,7 @@ export async function searchClients(notion: Client, query: string): Promise<Clie
   const digits = query.replace(/\D/g, '');
   if (!digits) return [];
   const response: any = await notion.request({
-    path: `data_sources/${M2026_DATA_SOURCE_ID}/query`,
+    path: `data_sources/${dbIds.m2026}/query`,
     method: 'post',
     body: {
       filter: { property: 'НОМЕР', title: { contains: digits } },
@@ -136,9 +136,22 @@ export async function archiveClient(notion: Client, pageId: string): Promise<voi
   });
 }
 
+export async function searchClientsUpcoming(notion: Client, fromISO: string, limit: number): Promise<ClientSummary[]> {
+  const response: any = await notion.request({
+    path: `data_sources/${dbIds.m2026}/query`,
+    method: 'post',
+    body: {
+      filter: { property: 'ДАТА', date: { on_or_after: fromISO } },
+      sorts: [{ property: 'ДАТА', direction: 'ascending' }],
+      page_size: Math.max(1, Math.min(limit, 50)),
+    },
+  });
+  return (response.results ?? []).map(parseClientPage);
+}
+
 export async function searchClientsByDateRange(notion: Client, startISO: string, endISO: string): Promise<ClientSummary[]> {
   const response: any = await notion.request({
-    path: `data_sources/${M2026_DATA_SOURCE_ID}/query`,
+    path: `data_sources/${dbIds.m2026}/query`,
     method: 'post',
     body: {
       filter: {
@@ -156,7 +169,7 @@ export async function searchClientsByDateRange(notion: Client, startISO: string,
 
 export async function loadClientPositions(notion: Client, clientPageId: string): Promise<DraftPosition[]> {
   const response: any = await notion.request({
-    path: `data_sources/${POSITIONS_DATA_SOURCE_ID}/query`,
+    path: `data_sources/${dbIds.positions}/query`,
     method: 'post',
     body: {
       filter: { property: 'М2026', relation: { contains: clientPageId } },
@@ -201,7 +214,7 @@ export async function updateClientFull(notion: Client, pageId: string, draft: Dr
 
   // Архивируем существующие позиции и создаём новые
   const existing: any = await notion.request({
-    path: `data_sources/${POSITIONS_DATA_SOURCE_ID}/query`,
+    path: `data_sources/${dbIds.positions}/query`,
     method: 'post',
     body: {
       filter: { property: 'М2026', relation: { contains: pageId } },
@@ -215,7 +228,7 @@ export async function updateClientFull(notion: Client, pageId: string, draft: Dr
   await Promise.all(
     draft.positions
       .filter(p => p.color && p.size && p.kind && p.qty)
-      .map(pos => createPage(notion, POSITIONS_DATA_SOURCE_ID, {
+      .map(pos => createPage(notion, dbIds.positions, {
         'Название': { title: [{ type: 'text', text: { content: '' } }] },
         'Цвет': { select: { name: pos.color } },
         'Размер': { select: { name: pos.size } },
@@ -276,7 +289,7 @@ export async function findClientsByPhone(notion: Client, phone: string): Promise
   const last10 = digits.slice(-10);
   const last7 = digits.slice(-7);
   const response: any = await notion.request({
-    path: `data_sources/${M2026_DATA_SOURCE_ID}/query`,
+    path: `data_sources/${dbIds.m2026}/query`,
     method: 'post',
     body: {
       filter: { property: 'НОМЕР', title: { contains: last7 } },
@@ -311,7 +324,7 @@ export async function findClientsByPhone(notion: Client, phone: string): Promise
 
 export async function getPositionsForClient(notion: Client, clientPageId: string): Promise<FoundPosition[]> {
   const response: any = await notion.request({
-    path: `data_sources/${POSITIONS_DATA_SOURCE_ID}/query`,
+    path: `data_sources/${dbIds.positions}/query`,
     method: 'post',
     body: {
       filter: { property: 'М2026', relation: { contains: clientPageId } },
@@ -339,6 +352,9 @@ export async function updateClientPage(notion: Client, pageId: string, changes: 
   if ('status' in changes && changes.status) {
     props['СТАТУС'] = { select: { name: changes.status } };
   }
+  if ('school' in changes) {
+    props['УЧЕБНОЕ ЗАВЕДЕНИЕ'] = changes.school ? { select: { name: changes.school } } : { select: null };
+  }
   if ('paid' in changes && typeof changes.paid === 'number') {
     props['ОПЛАЧЕНО'] = { number: changes.paid };
   }
@@ -361,9 +377,13 @@ export async function updatePositionPage(notion: Client, pageId: string, changes
   await notion.request({ path: `pages/${pageId}`, method: 'patch', body: { properties: props } });
 }
 
+export async function archivePosition(notion: Client, positionPageId: string): Promise<void> {
+  await notion.request({ path: `pages/${positionPageId}`, method: 'patch', body: { archived: true } });
+}
+
 export async function addPositionToClient(notion: Client, clientPageId: string, pos: DraftPosition): Promise<void> {
   if (!pos.color || !pos.size || !pos.kind || !pos.qty) return;
-  await createPage(notion, POSITIONS_DATA_SOURCE_ID, {
+  await createPage(notion, dbIds.positions, {
     'Название': { title: [{ type: 'text', text: { content: '' } }] },
     'Цвет': { select: { name: pos.color } },
     'Размер': { select: { name: pos.size } },

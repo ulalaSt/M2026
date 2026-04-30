@@ -7,6 +7,10 @@ import {
   updateClientPage,
   updatePositionPage,
   addPositionToClient,
+  archivePosition,
+  searchClientsUpcoming,
+  searchClientsByDateRange,
+  loadClientPositions,
   FoundClient,
   FoundPosition,
 } from './notion';
@@ -23,7 +27,7 @@ import {
 type Env = {
   kv: KVNamespace;
   notion: NotionClient;
-  geminiKey: string;
+  anthropicKey: string;
 };
 
 function fmtDate(iso?: string): string {
@@ -51,6 +55,129 @@ function formatPos(p: { color?: string; size?: string; kind?: string; qty?: numb
   return `${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`;
 }
 
+function totalQty(positions: FoundPosition[]): number {
+  return positions.reduce((s, p) => s + (p.qty ?? 0), 0);
+}
+
+function daysUntil(iso: string): number {
+  const d = new Date(iso + 'T00:00:00');
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((d.getTime() - today.getTime()) / 86400000);
+}
+
+function formatFullCard(c: FoundClient): string {
+  const lines: string[] = [];
+  lines.push(`📞 ${c.phone}`);
+  if (c.status) lines.push(`🚦 ${c.status}`);
+  if (c.date) {
+    const d = daysUntil(c.date);
+    const tail = d === 0 ? ' (сегодня)' : d > 0 ? ` (через ${d} дн)` : ` (${-d} дн назад)`;
+    lines.push(`📅 ${c.date}${tail}`);
+  }
+  if (c.school) lines.push(`🏫 ${c.school}`);
+  if (typeof c.price === 'number') lines.push(`💵 Цена: ${c.price} тг`);
+  if (typeof c.paid === 'number') lines.push(`💰 Оплачено: ${c.paid} тг`);
+  if (typeof c.discount === 'number') lines.push(`🏷 Скидка: ${c.discount} тг`);
+  if (c.note) lines.push(`💬 ${c.note}`);
+  if (c.positions.length) {
+    lines.push(`📦 Позиции:`);
+    for (const p of c.positions) lines.push(`  • ${formatPos(p)}`);
+  }
+  const t = totalQty(c.positions);
+  if (typeof c.price === 'number' && t > 0) {
+    const remaining = c.price * t - (c.paid ?? 0) - (c.discount ?? 0);
+    lines.push(`💸 Остаток: ${remaining} тг`);
+  }
+  return lines.join('\n');
+}
+
+function formatReceipt(c: FoundClient): string {
+  const lines: string[] = [];
+  lines.push(`🧾 Чек по заказу`);
+  lines.push(`📞 ${c.phone}`);
+  if (c.school) lines.push(`🏫 ${c.school}`);
+  if (c.date) lines.push(`📅 Дата выдачи: ${c.date}`);
+  lines.push('');
+  lines.push(`📦 Позиции:`);
+  for (const p of c.positions) lines.push(`  • ${formatPos(p)}`);
+  const t = totalQty(c.positions);
+  const price = c.price ?? 0;
+  const sum = price * t;
+  lines.push('');
+  lines.push(`Всего: ${t} шт × ${price} тг = ${sum} тг`);
+  if (c.discount) lines.push(`🏷 Скидка: −${c.discount} тг`);
+  if (c.paid) lines.push(`💰 Оплачено: −${c.paid} тг`);
+  const remaining = sum - (c.paid ?? 0) - (c.discount ?? 0);
+  lines.push(`💸 К оплате: ${remaining} тг`);
+  return lines.join('\n');
+}
+
+async function handleShowOrders(
+  ctx: Context,
+  env: Env,
+  intent: Extract<AIIntent, { intent: 'show_orders' }>,
+): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  let clients: FoundClient[];
+  let header = '';
+  if (intent.startDate && intent.endDate) {
+    const summaries = await searchClientsByDateRange(env.notion, intent.startDate, intent.endDate);
+    clients = await Promise.all(summaries.map(async s => ({
+      ...s,
+      address: undefined,
+      positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map((p, i) => ({ ...p, pageId: '' }))),
+    })));
+    header = `📅 ${intent.startDate === intent.endDate ? intent.startDate : `${intent.startDate} — ${intent.endDate}`}`;
+  } else {
+    const start = intent.startDate ?? today;
+    const limit = intent.limit ?? 10;
+    const summaries = await searchClientsUpcoming(env.notion, start, limit);
+    clients = await Promise.all(summaries.map(async s => ({
+      ...s,
+      address: undefined,
+      positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map((p, i) => ({ ...p, pageId: '' }))),
+    })));
+    header = `📅 Ближайшие ${clients.length} (с ${start})`;
+  }
+  if (clients.length === 0) {
+    await ctx.reply(`${header}\nЗаказов нет.`);
+    return;
+  }
+  const colorKindTotals = new Map<string, number>();
+  let totalPaid = 0;
+  let totalSum = 0;
+  for (const c of clients) {
+    const q = totalQty(c.positions);
+    if (typeof c.price === 'number') totalSum += c.price * q;
+    if (typeof c.paid === 'number') totalPaid += c.paid;
+    for (const p of c.positions) {
+      if (!p.color || !p.kind || !p.qty) continue;
+      const key = `${p.color} ${p.kind}`;
+      colorKindTotals.set(key, (colorKindTotals.get(key) ?? 0) + p.qty);
+    }
+  }
+  const out: string[] = [];
+  out.push(header);
+  out.push(`📦 Заказов: ${clients.length}`);
+  if (colorKindTotals.size) {
+    out.push('🎨 Итого:');
+    for (const [k, q] of colorKindTotals) out.push(`   • ${k} ×${q}`);
+  }
+  out.push(`💰 Оплачено: ${totalPaid} тг`);
+  out.push(`💵 Сумма: ${totalSum} тг`);
+  out.push('');
+  for (const c of clients) {
+    const head: string[] = [c.phone];
+    if (c.school) head.push(c.school);
+    if (c.date) head.push(c.date);
+    if (c.status) head.push(c.status);
+    out.push('— ' + head.join(' · '));
+    for (const p of c.positions) out.push(`   • ${formatPos(p)}`);
+  }
+  await ctx.reply(out.join('\n').slice(0, 4000));
+}
+
 function matchPositions(positions: FoundPosition[], match: { color?: string; size?: string; kind?: string }): FoundPosition[] {
   return positions.filter(p =>
     (!match.color || p.color === match.color) &&
@@ -64,7 +191,7 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
   const schema = await getSchema(env.notion, env.kv);
   let intent: AIIntent;
   try {
-    intent = await parseIntent(env.geminiKey, text, schema);
+    intent = await parseIntent(env.anthropicKey, text, schema);
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
     return;
@@ -75,8 +202,28 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
     return;
   }
 
+  // Read-only: показ заказов (без подтверждения)
+  if (intent.intent === 'show_orders') {
+    return handleShowOrders(ctx, env, intent);
+  }
+
+  // Все остальные intents требуют телефон
   if (!intent.phone) {
     await ctx.reply('❌ Не указан телефон клиента в запросе.');
+    return;
+  }
+
+  // Read-only: показать клиента / чек
+  if (intent.intent === 'show_client') {
+    const clients = await findClientsByPhone(env.notion, intent.phone);
+    if (clients.length === 0) { await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.`); return; }
+    if (clients.length > 1) { await ctx.reply(`❌ Несколько клиентов (${clients.length}). Уточни номер.`); return; }
+    const c = clients[0];
+    if (intent.mode === 'receipt') {
+      await ctx.reply(formatReceipt(c));
+    } else {
+      await ctx.reply(formatFullCard(c));
+    }
     return;
   }
 
@@ -124,12 +271,69 @@ async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: 
         { type: 'update_client', changes: { note: intent.note } },
       ]);
     }
+    case 'change_school': {
+      const desc = `🏫 Уч. заведение: ${client.school ?? '—'} → ${intent.newSchool}`;
+      return saveAndPrompt(ctx, env, client, desc, [
+        { type: 'update_client', changes: { school: intent.newSchool } },
+      ]);
+    }
     case 'add_position': {
       const desc = `➕ Добавить: ${intent.color} ${intent.size} ${intent.kind} ×${intent.qty}`;
       return saveAndPrompt(ctx, env, client, desc, [
         { type: 'add_position', pos: { color: intent.color, size: intent.size, kind: intent.kind, qty: intent.qty } },
       ]);
     }
+    case 'split_position': {
+      const sources = matchPositions(client.positions, intent.positionMatch);
+      if (sources.length === 0) {
+        await ctx.reply(`❌ Не нашёл позицию для деления: ${formatPos(intent.positionMatch)}`);
+        return;
+      }
+      if (sources.length > 1) {
+        await ctx.reply(`❌ Несколько подходящих позиций (${sources.length}). Уточни цвет/размер/вид.`);
+        return;
+      }
+      const src = sources[0];
+      if ((src.qty ?? 0) < intent.qty) {
+        await ctx.reply(`❌ В позиции «${formatPos(src)}» только ${src.qty} шт. Нельзя забрать ${intent.qty}.`);
+        return;
+      }
+      const target = {
+        color: intent.newColor ?? src.color,
+        size: intent.newSize ?? src.size,
+        kind: intent.newKind ?? src.kind,
+      };
+      // ищем существующую позицию того же клиента которая совпадает с target по всем 3 полям
+      const dest = client.positions.find(p =>
+        p.pageId !== src.pageId &&
+        p.color === target.color &&
+        p.size === target.size &&
+        p.kind === target.kind,
+      );
+      const remaining = (src.qty ?? 0) - intent.qty;
+      const ops: PendingOp[] = [];
+      if (remaining === 0) {
+        ops.push({ type: 'archive_position', positionPageId: src.pageId });
+      } else {
+        ops.push({ type: 'update_position', positionPageId: src.pageId, changes: { qty: remaining } });
+      }
+      if (dest) {
+        ops.push({ type: 'update_position', positionPageId: dest.pageId, changes: { qty: (dest.qty ?? 0) + intent.qty } });
+      } else {
+        if (!target.color || !target.size || !target.kind) {
+          await ctx.reply('❌ Недостаточно данных для целевой позиции.');
+          return;
+        }
+        ops.push({ type: 'add_position', pos: { color: target.color, size: target.size, kind: target.kind, qty: intent.qty } });
+      }
+      const srcAfter = remaining === 0 ? '(удалить)' : `${formatPos(src)} → ×${remaining}`;
+      const destAfter = dest
+        ? `${formatPos(dest)} → ×${(dest.qty ?? 0) + intent.qty}`
+        : `создать ${target.color} ${target.size} ${target.kind} ×${intent.qty}`;
+      const desc = `✏ Разделить ${intent.qty} шт:\n  • было: ${formatPos(src)}\n  • станет: ${srcAfter}\n  • перенос: ${destAfter}`;
+      return saveAndPrompt(ctx, env, client, desc, ops);
+    }
+
     case 'change_position': {
       const matches = matchPositions(client.positions, intent.positionMatch);
       if (matches.length === 0) {
@@ -237,6 +441,8 @@ export async function applyPendingEdit(ctx: Context, env: Env): Promise<void> {
         await updatePositionPage(env.notion, op.positionPageId, op.changes);
       } else if (op.type === 'add_position') {
         await addPositionToClient(env.notion, pe.clientPageId, op.pos);
+      } else if (op.type === 'archive_position') {
+        await archivePosition(env.notion, op.positionPageId);
       }
     }
     await clearSession(env.kv, userId);

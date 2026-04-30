@@ -66,7 +66,8 @@ export type DraftClient = {
 export type PendingOp =
   | { type: 'update_client'; changes: Record<string, any> }
   | { type: 'update_position'; positionPageId: string; changes: Record<string, any> }
-  | { type: 'add_position'; pos: DraftPosition };
+  | { type: 'add_position'; pos: DraftPosition }
+  | { type: 'archive_position'; positionPageId: string };
 
 export type PendingEdit = {
   clientPageId: string;

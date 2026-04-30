@@ -1,6 +1,6 @@
 import { Bot, webhookCallback, Context } from 'grammy';
 import { Client as NotionClient } from '@notionhq/client';
-import { ALLOWED_USER_IDS } from './config';
+import { ALLOWED_USER_IDS, setDbIds } from './config';
 import {
   handleStart,
   handleNew,
@@ -17,15 +17,18 @@ export interface CloudflareEnv {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_BOT_SECRET: string;
   NOTION_TOKEN: string;
-  GEMINI_API_KEY: string;
+  ANTHROPIC_API_KEY: string;
+  M2026_DATA_SOURCE_ID?: string;
+  POSITIONS_DATA_SOURCE_ID?: string;
   SESSIONS: KVNamespace;
 }
 
 export default {
   async fetch(request: Request, env: CloudflareEnv): Promise<Response> {
+    setDbIds(env.M2026_DATA_SOURCE_ID, env.POSITIONS_DATA_SOURCE_ID);
     const bot = new Bot(env.TELEGRAM_BOT_TOKEN);
     const notion = new NotionClient({ auth: env.NOTION_TOKEN });
-    const handlerEnv = { kv: env.SESSIONS, notion, geminiKey: env.GEMINI_API_KEY };
+    const handlerEnv = { kv: env.SESSIONS, notion, anthropicKey: env.ANTHROPIC_API_KEY };
 
     // Whitelist: блокируем чужих
     bot.use(async (ctx, next) => {

@@ -1,7 +1,6 @@
 import { Client } from '@notionhq/client';
 import {
-  M2026_DATA_SOURCE_ID,
-  POSITIONS_DATA_SOURCE_ID,
+  dbIds,
   SCHEMA_CACHE_TTL_SECONDS,
 } from './config';
 
@@ -43,8 +42,8 @@ export async function getSchema(
 async function fetchSchemaFromNotion(notion: Client): Promise<Schema> {
   // Notion SDK работает через databases.retrieve, но новый API использует
   // dataSources.retrieve. Используем raw request чтобы не зависеть от версии SDK.
-  const m2026 = await retrieveDataSource(notion, M2026_DATA_SOURCE_ID);
-  const positions = await retrieveDataSource(notion, POSITIONS_DATA_SOURCE_ID);
+  const m2026 = await retrieveDataSource(notion, dbIds.m2026);
+  const positions = await retrieveDataSource(notion, dbIds.positions);
 
   return {
     schools: extractSelectOptions(m2026, 'УЧЕБНОЕ ЗАВЕДЕНИЕ'),
