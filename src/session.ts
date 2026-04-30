@@ -73,6 +73,7 @@ export type PendingEdit = {
   clientPageId: string;
   description: string;
   operations: PendingOp[];
+  usageLine?: string;
 };
 
 export type PendingChange = {

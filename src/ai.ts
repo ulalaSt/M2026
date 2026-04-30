@@ -27,6 +27,7 @@ export type AIIntent =
     }
   | { intent: 'show_client'; phone: string; mode?: 'card' | 'receipt' }
   | { intent: 'show_orders'; startDate?: string; endDate?: string; limit?: number; status?: string }
+  | { intent: 'show_timeline'; startDate: string; endDate: string }
   | { intent: 'unclear'; reason: string };
 
 const TOOL = {
@@ -37,7 +38,7 @@ const TOOL = {
     properties: {
       intent: {
         type: 'string',
-        enum: ['change_date', 'change_status', 'change_payment', 'change_note', 'change_school', 'change_position', 'add_position', 'split_position', 'show_client', 'show_orders', 'unclear'],
+        enum: ['change_date', 'change_status', 'change_payment', 'change_note', 'change_school', 'change_position', 'add_position', 'split_position', 'show_client', 'show_orders', 'show_timeline', 'unclear'],
         description: 'Тип действия',
       },
       phone: { type: 'string', description: 'Телефон клиента или пустая строка если не указан' },
@@ -121,6 +122,7 @@ Read-only запросы:
 - "покажи на завтра / сегодня / N дней" / "что подготовить на завтра" / "заказы на эту неделю" → show_orders с startDate/endDate (даты вычисляешь от сегодня)
 - "ближайший заказ" / "следующий заказ" → show_orders с startDate=сегодня, limit=1
 - "первые N заказов" / "ближайшие N заказов" / "следующие N" → show_orders с startDate=сегодня, limit=N
+- "таймлайн" / "календарь на месяц" / "по дням" / "визуально по датам" → show_timeline. startDate/endDate обязательны (если месяц — 30 дней от сегодня).
 - Запросы read-only НЕ требуют подтверждения — выполняются сразу.
 - Телефон может быть полным (87771112233, +77771112233) или последними 4-7 цифрами (например "2233", "112233"). Передавай как есть в phone — поиск сам найдёт.
 - Если телефон не указан вообще — phone=""
@@ -128,7 +130,20 @@ Read-only запросы:
 - Если непонятно или не хватает данных — intent=unclear с reason.`;
 }
 
-export async function parseIntent(apiKey: string, userMessage: string, schema: Schema): Promise<AIIntent> {
+export type Usage = { inputTokens: number; outputTokens: number };
+export type AIResult = { intent: AIIntent; usage: Usage };
+
+const HAIKU_INPUT_USD_PER_TOKEN = 1 / 1_000_000;
+const HAIKU_OUTPUT_USD_PER_TOKEN = 5 / 1_000_000;
+const USD_KZT_RATE = 500;
+
+export function formatUsage(u: Usage): string {
+  const usd = u.inputTokens * HAIKU_INPUT_USD_PER_TOKEN + u.outputTokens * HAIKU_OUTPUT_USD_PER_TOKEN;
+  const kzt = usd * USD_KZT_RATE;
+  return `💸 Запрос: ${u.inputTokens} in + ${u.outputTokens} out = $${usd.toFixed(4)} (~${kzt.toFixed(2)} ₸)`;
+}
+
+export async function parseIntent(apiKey: string, userMessage: string, schema: Schema): Promise<AIResult> {
   const body = {
     model: 'claude-haiku-4-5',
     max_tokens: 500,
@@ -152,11 +167,15 @@ export async function parseIntent(apiKey: string, userMessage: string, schema: S
     throw new Error(`Anthropic ${resp.status}: ${txt.slice(0, 200)}`);
   }
   const json: any = await resp.json();
+  const usage: Usage = {
+    inputTokens: json?.usage?.input_tokens ?? 0,
+    outputTokens: json?.usage?.output_tokens ?? 0,
+  };
   const block = (json?.content ?? []).find((c: any) => c.type === 'tool_use' && c.name === 'register_intent');
   if (!block) {
-    return { intent: 'unclear', reason: 'Не удалось распознать намерение' };
+    return { intent: { intent: 'unclear', reason: 'Не удалось распознать намерение' }, usage };
   }
-  return mapToIntent(block.input ?? {}, schema);
+  return { intent: mapToIntent(block.input ?? {}, schema), usage };
 }
 
 function mapToIntent(args: any, schema: Schema): AIIntent {
@@ -259,6 +278,12 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       if (!phone) return { intent: 'unclear', reason: 'Не указан телефон клиента' };
       const mode = args.mode === 'receipt' ? 'receipt' : 'card';
       return { intent: 'show_client', phone, mode };
+    }
+    case 'show_timeline': {
+      if (!args.startDate || !args.endDate) {
+        return { intent: 'unclear', reason: 'Не указан период для таймлайна' };
+      }
+      return { intent: 'show_timeline', startDate: args.startDate, endDate: args.endDate };
     }
     case 'show_orders': {
       const r: AIIntent = { intent: 'show_orders' };

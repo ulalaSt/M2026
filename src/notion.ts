@@ -247,6 +247,7 @@ export type FoundPosition = {
   size?: string;
   kind?: string;
   qty?: number;
+  label?: string; // формула «Позиция» из Notion (например "🟢 И-2L")
 };
 
 export type FoundClient = {
@@ -281,6 +282,13 @@ export function extractDate(p: any, key: string): string | undefined {
   const start = p?.[key]?.date?.start as string | undefined;
   if (!start) return undefined;
   return start.includes('T') ? start.split('T')[0] : start;
+}
+export function extractFormulaString(p: any, key: string): string | undefined {
+  const f = p?.[key]?.formula;
+  if (!f) return undefined;
+  if (f.type === 'string') return f.string;
+  if (f.type === 'number') return String(f.number);
+  return undefined;
 }
 
 export async function findClientsByPhone(notion: Client, phone: string): Promise<FoundClient[]> {
@@ -339,6 +347,7 @@ export async function getPositionsForClient(notion: Client, clientPageId: string
       size: extractSelect(p, 'Размер'),
       kind: extractSelect(p, 'Вид'),
       qty: extractNumber(p, 'Количество'),
+      label: extractFormulaString(p, 'Позиция') ?? extractFormulaString(p, 'Название'),
     };
   });
 }

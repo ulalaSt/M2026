@@ -1,7 +1,7 @@
 import { Context, InlineKeyboard } from 'grammy';
 import { Client as NotionClient } from '@notionhq/client';
 import { getSchema } from './schema';
-import { parseIntent, AIIntent } from './ai';
+import { parseIntent, AIIntent, formatUsage, Usage } from './ai';
 import {
   findClientsByPhone,
   updateClientPage,
@@ -178,6 +178,69 @@ async function handleShowOrders(
   await ctx.reply(out.join('\n').slice(0, 4000));
 }
 
+const KIND_CODE: Record<string, string> = {
+  'Взрослый': 'В',
+  'Детский': 'Д',
+  'Садик': 'С',
+};
+
+function compactPos(p: FoundPosition): string {
+  if (p.label) return p.label;
+  const colorEmoji = p.color ? p.color.split(/\s/)[0] : '?';
+  const kindCode = KIND_CODE[p.kind ?? ''] ?? p.kind?.[0] ?? '?';
+  return `${colorEmoji} ${kindCode}-${p.qty ?? '?'}${p.size ?? ''}`;
+}
+
+function shortClientId(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return digits.slice(-4);
+}
+
+function fmtDayShort(iso: string): string {
+  const [, m, d] = iso.split('-');
+  return `${d}.${m}`;
+}
+
+async function handleShowTimeline(ctx: Context, env: Env, startISO: string, endISO: string): Promise<void> {
+  const summaries = await searchClientsByDateRange(env.notion, startISO, endISO);
+  const clients: FoundClient[] = await Promise.all(summaries.map(async s => ({
+    ...s,
+    address: undefined,
+    positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map(p => ({ ...p, pageId: '' }))),
+  })));
+  // group by date
+  const byDate = new Map<string, FoundClient[]>();
+  for (const c of clients) {
+    if (!c.date) continue;
+    const arr = byDate.get(c.date) ?? [];
+    arr.push(c);
+    byDate.set(c.date, arr);
+  }
+  // iterate days from startISO to endISO
+  const out: string[] = [`📅 Таймлайн ${fmtDayShort(startISO)} — ${fmtDayShort(endISO)}`, ''];
+  const start = new Date(startISO + 'T00:00:00');
+  const end = new Date(endISO + 'T00:00:00');
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const iso = d.toISOString().slice(0, 10);
+    const day = fmtDayShort(iso);
+    const list = byDate.get(iso) ?? [];
+    if (list.length === 0) {
+      out.push(day);
+      continue;
+    }
+    const parts = list.map(c => {
+      const positions = c.positions.map(compactPos).join(' ');
+      return `N${shortClientId(c.phone)}→${positions}`;
+    });
+    out.push(`${day} ${parts.join('  ')}`);
+  }
+  // chunk by 4000 chars
+  const text = out.join('\n');
+  for (let i = 0; i < text.length; i += 3900) {
+    await ctx.reply(text.slice(i, i + 3900));
+  }
+}
+
 function matchPositions(positions: FoundPosition[], match: { color?: string; size?: string; kind?: string }): FoundPosition[] {
   return positions.filter(p =>
     (!match.color || p.color === match.color) &&
@@ -190,70 +253,76 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
   const userId = ctx.from!.id;
   const schema = await getSchema(env.notion, env.kv);
   let intent: AIIntent;
+  let usage: Usage;
   try {
-    intent = await parseIntent(env.anthropicKey, text, schema);
+    const r = await parseIntent(env.anthropicKey, text, schema);
+    intent = r.intent;
+    usage = r.usage;
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
     return;
   }
+  const usageLine = formatUsage(usage);
 
   if (intent.intent === 'unclear') {
-    await ctx.reply(`🤔 Не понял: ${intent.reason}\n\nКоманды: /new /status /orders /refresh`);
+    await ctx.reply(`🤔 Не понял: ${intent.reason}\n\n${usageLine}`);
     return;
   }
 
-  // Read-only: показ заказов (без подтверждения)
   if (intent.intent === 'show_orders') {
-    return handleShowOrders(ctx, env, intent);
-  }
-
-  // Все остальные intents требуют телефон
-  if (!intent.phone) {
-    await ctx.reply('❌ Не указан телефон клиента в запросе.');
+    await handleShowOrders(ctx, env, intent);
+    await ctx.reply(usageLine);
     return;
   }
 
-  // Read-only: показать клиента / чек
+  if (intent.intent === 'show_timeline') {
+    await handleShowTimeline(ctx, env, intent.startDate, intent.endDate);
+    await ctx.reply(usageLine);
+    return;
+  }
+
+  if (!intent.phone) {
+    await ctx.reply(`❌ Не указан телефон клиента в запросе.\n\n${usageLine}`);
+    return;
+  }
+
   if (intent.intent === 'show_client') {
     const clients = await findClientsByPhone(env.notion, intent.phone);
-    if (clients.length === 0) { await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.`); return; }
-    if (clients.length > 1) { await ctx.reply(`❌ Несколько клиентов (${clients.length}). Уточни номер.`); return; }
+    if (clients.length === 0) { await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.\n\n${usageLine}`); return; }
+    if (clients.length > 1) { await ctx.reply(`❌ Несколько клиентов (${clients.length}). Уточни номер.\n\n${usageLine}`); return; }
     const c = clients[0];
-    if (intent.mode === 'receipt') {
-      await ctx.reply(formatReceipt(c));
-    } else {
-      await ctx.reply(formatFullCard(c));
-    }
+    const body = intent.mode === 'receipt' ? formatReceipt(c) : formatFullCard(c);
+    await ctx.reply(`${body}\n\n${usageLine}`);
     return;
   }
 
   const clients = await findClientsByPhone(env.notion, intent.phone);
   if (clients.length === 0) {
-    await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.`);
+    await ctx.reply(`❌ Клиент с номером ${intent.phone} не найден.\n\n${usageLine}`);
     return;
   }
   if (clients.length > 1) {
-    await ctx.reply(`❌ Найдено несколько клиентов (${clients.length}) с похожим номером. Уточни.`);
+    await ctx.reply(`❌ Найдено несколько клиентов (${clients.length}) с похожим номером. Уточни.\n\n${usageLine}`);
     return;
   }
 
   const client = clients[0];
-  await prepareEdit(ctx, env, client, intent);
+  await prepareEdit(ctx, env, client, intent, usageLine);
 }
 
-async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: AIIntent): Promise<void> {
+async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: AIIntent, usageLine?: string): Promise<void> {
   const userId = ctx.from!.id;
 
   switch (intent.intent) {
     case 'change_date': {
       const desc = `📅 Дата: ${fmtDate(client.date)} → ${fmtDate(intent.newDate)}`;
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'update_client', changes: { date: intent.newDate } },
       ]);
     }
     case 'change_status': {
       const desc = `🚦 Статус: ${client.status ?? '—'} → ${intent.newStatus}`;
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'update_client', changes: { status: intent.newStatus } },
       ]);
     }
@@ -261,25 +330,25 @@ async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: 
       const cur = client.paid ?? 0;
       const next = intent.setPaid !== undefined ? intent.setPaid : cur + (intent.addPaid ?? 0);
       const desc = `💰 Оплачено: ${cur} → ${next} тг`;
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'update_client', changes: { paid: next } },
       ]);
     }
     case 'change_note': {
       const desc = `💬 Примечание: ${client.note ?? '—'} → ${intent.note}`;
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'update_client', changes: { note: intent.note } },
       ]);
     }
     case 'change_school': {
       const desc = `🏫 Уч. заведение: ${client.school ?? '—'} → ${intent.newSchool}`;
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'update_client', changes: { school: intent.newSchool } },
       ]);
     }
     case 'add_position': {
       const desc = `➕ Добавить: ${intent.color} ${intent.size} ${intent.kind} ×${intent.qty}`;
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'add_position', pos: { color: intent.color, size: intent.size, kind: intent.kind, qty: intent.qty } },
       ]);
     }
@@ -331,7 +400,7 @@ async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: 
         ? `${formatPos(dest)} → ×${(dest.qty ?? 0) + intent.qty}`
         : `создать ${target.color} ${target.size} ${target.kind} ×${intent.qty}`;
       const desc = `✏ Разделить ${intent.qty} шт:\n  • было: ${formatPos(src)}\n  • станет: ${srcAfter}\n  • перенос: ${destAfter}`;
-      return saveAndPrompt(ctx, env, client, desc, ops);
+      return saveAndPrompt(ctx, env, client, desc, usageLine, ops);
     }
 
     case 'change_position': {
@@ -373,7 +442,7 @@ async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: 
       const pos = matches[0];
       const desc = buildChangePosDesc(pos, intent);
       const changes = buildChangePosChanges(intent);
-      return saveAndPrompt(ctx, env, client, desc, [
+      return saveAndPrompt(ctx, env, client, desc, usageLine, [
         { type: 'update_position', positionPageId: pos.pageId, changes },
       ]);
     }
@@ -405,6 +474,7 @@ async function saveAndPrompt(
   env: Env,
   client: FoundClient,
   description: string,
+  usageLine: string | undefined,
   operations: PendingOp[],
 ): Promise<void> {
   const userId = ctx.from!.id;
@@ -414,13 +484,15 @@ async function saveAndPrompt(
     clientPageId: client.pageId,
     description,
     operations,
+    usageLine,
   };
   await saveSession(env.kv, userId, session);
   const kb = new InlineKeyboard()
     .text('✅ Применить', 'edit:apply')
     .text('❌ Отмена', 'edit:cancel');
+  const tail = usageLine ? `\n\n${usageLine}` : '';
   await ctx.reply(
-    `Текущий клиент:\n${formatClient(client)}\n\nИзменения:\n${description}`,
+    `Текущий клиент:\n${formatClient(client)}\n\nИзменения:\n${description}${tail}`,
     { reply_markup: kb },
   );
 }
@@ -446,7 +518,8 @@ export async function applyPendingEdit(ctx: Context, env: Env): Promise<void> {
       }
     }
     await clearSession(env.kv, userId);
-    await ctx.reply(`✅ Применено: ${pe.description}`);
+    const tail = pe.usageLine ? `\n${pe.usageLine}` : '';
+    await ctx.reply(`✅ Применено: ${pe.description}${tail}`);
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка применения: ${err?.message ?? err}`);
   }
@@ -497,7 +570,7 @@ export async function pickPosition(ctx: Context, env: Env, positionPageId: strin
   };
   const desc = buildChangePosDesc(pos, intent);
   const changes = buildChangePosChanges(intent);
-  return saveAndPrompt(ctx, env, client, desc, [
+  return saveAndPrompt(ctx, env, client, desc, undefined, [
     { type: 'update_position', positionPageId: pos.pageId, changes },
   ]);
 }
