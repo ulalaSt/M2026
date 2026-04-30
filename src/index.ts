@@ -11,6 +11,7 @@ import {
   handleText,
   handleCallback,
   handleContact,
+  handleVoice,
 } from './flow';
 
 export interface CloudflareEnv {
@@ -18,6 +19,7 @@ export interface CloudflareEnv {
   TELEGRAM_BOT_SECRET: string;
   NOTION_TOKEN: string;
   ANTHROPIC_API_KEY: string;
+  GROQ_API_KEY: string;
   M2026_DATA_SOURCE_ID?: string;
   POSITIONS_DATA_SOURCE_ID?: string;
   SESSIONS: KVNamespace;
@@ -28,7 +30,13 @@ export default {
     setDbIds(env.M2026_DATA_SOURCE_ID, env.POSITIONS_DATA_SOURCE_ID);
     const bot = new Bot(env.TELEGRAM_BOT_TOKEN);
     const notion = new NotionClient({ auth: env.NOTION_TOKEN });
-    const handlerEnv = { kv: env.SESSIONS, notion, anthropicKey: env.ANTHROPIC_API_KEY };
+    const handlerEnv = {
+      kv: env.SESSIONS,
+      notion,
+      anthropicKey: env.ANTHROPIC_API_KEY,
+      groqKey: env.GROQ_API_KEY,
+      telegramToken: env.TELEGRAM_BOT_TOKEN,
+    };
 
     // Whitelist: блокируем чужих
     bot.use(async (ctx, next) => {
@@ -61,6 +69,9 @@ export default {
 
     // Контакт (когда телефон отправлен как карточка контакта)
     bot.on('message:contact', (ctx) => handleContact(ctx, handlerEnv));
+
+    // Голосовые сообщения
+    bot.on('message:voice', (ctx) => handleVoice(ctx, handlerEnv));
 
     // Текстовые сообщения (свободный ввод полей)
     bot.on('message:text', (ctx) => handleText(ctx, handlerEnv));

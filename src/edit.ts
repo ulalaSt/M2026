@@ -250,11 +250,10 @@ function matchPositions(positions: FoundPosition[], match: { color?: string; siz
 }
 
 export async function handleAIMessage(ctx: Context, env: Env, text: string): Promise<void> {
-  const userId = ctx.from!.id;
-  const schema = await getSchema(env.notion, env.kv);
   let intent: AIIntent;
   let usage: Usage;
   try {
+    const schema = await getSchema(env.notion, env.kv);
     const r = await parseIntent(env.anthropicKey, text, schema);
     intent = r.intent;
     usage = r.usage;
@@ -262,8 +261,10 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
     await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
     return;
   }
-  const usageLine = formatUsage(usage);
+  return handleParsedIntent(ctx, env, intent, formatUsage(usage));
+}
 
+export async function handleParsedIntent(ctx: Context, env: Env, intent: AIIntent, usageLine: string): Promise<void> {
   if (intent.intent === 'unclear') {
     await ctx.reply(`🤔 Не понял: ${intent.reason}\n\n${usageLine}`);
     return;
@@ -305,9 +306,7 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
     await ctx.reply(`❌ Найдено несколько клиентов (${clients.length}) с похожим номером. Уточни.\n\n${usageLine}`);
     return;
   }
-
-  const client = clients[0];
-  await prepareEdit(ctx, env, client, intent, usageLine);
+  await prepareEdit(ctx, env, clients[0], intent, usageLine);
 }
 
 async function prepareEdit(ctx: Context, env: Env, client: FoundClient, intent: AIIntent, usageLine?: string): Promise<void> {

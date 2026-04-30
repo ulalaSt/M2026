@@ -130,15 +130,19 @@ Read-only запросы:
 - Если непонятно или не хватает данных — intent=unclear с reason.`;
 }
 
-export type Usage = { inputTokens: number; outputTokens: number };
+export type ModelKey = 'haiku' | 'sonnet';
+export type Usage = { inputTokens: number; outputTokens: number; model: ModelKey };
 export type AIResult = { intent: AIIntent; usage: Usage };
 
-const HAIKU_INPUT_USD_PER_TOKEN = 1 / 1_000_000;
-const HAIKU_OUTPUT_USD_PER_TOKEN = 5 / 1_000_000;
+const PRICING: Record<ModelKey, { in: number; out: number }> = {
+  haiku: { in: 1 / 1_000_000, out: 5 / 1_000_000 },
+  sonnet: { in: 3 / 1_000_000, out: 15 / 1_000_000 },
+};
 const USD_KZT_RATE = 500;
 
 export function formatUsage(u: Usage): string {
-  const usd = u.inputTokens * HAIKU_INPUT_USD_PER_TOKEN + u.outputTokens * HAIKU_OUTPUT_USD_PER_TOKEN;
+  const p = PRICING[u.model];
+  const usd = u.inputTokens * p.in + u.outputTokens * p.out;
   const kzt = usd * USD_KZT_RATE;
   return `💸 Запрос: ${u.inputTokens} in + ${u.outputTokens} out = $${usd.toFixed(4)} (~${kzt.toFixed(2)} ₸)`;
 }
@@ -170,6 +174,7 @@ export async function parseIntent(apiKey: string, userMessage: string, schema: S
   const usage: Usage = {
     inputTokens: json?.usage?.input_tokens ?? 0,
     outputTokens: json?.usage?.output_tokens ?? 0,
+    model: 'haiku',
   };
   const block = (json?.content ?? []).find((c: any) => c.type === 'tool_use' && c.name === 'register_intent');
   if (!block) {
@@ -177,6 +182,7 @@ export async function parseIntent(apiKey: string, userMessage: string, schema: S
   }
   return { intent: mapToIntent(block.input ?? {}, schema), usage };
 }
+
 
 function mapToIntent(args: any, schema: Schema): AIIntent {
   const intent = args.intent as string;

@@ -3,12 +3,16 @@ import { Client as NotionClient } from '@notionhq/client';
 import { Session, getSession, saveSession, clearSession, emptySession, DraftPosition, DraftClient } from './session';
 import { getSchema, Schema } from './schema';
 import { createClientWithPositions, searchClients, searchClientsByDateRange, updateClientStatus, archiveClient, loadClientPositions, updateClientFull, getClient, ClientSummary } from './notion';
-import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition } from './edit';
+import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition, handleParsedIntent } from './edit';
+import { parseIntent, formatUsage } from './ai';
+import { transcribeAudio, LOW_CONFIDENCE_THRESHOLD } from './voice';
 
 type Env = {
   kv: KVNamespace;
   notion: NotionClient;
   anthropicKey: string;
+  groqKey: string;
+  telegramToken: string;
 };
 
 // --- Утилиты для клавиатур ---
@@ -145,6 +149,53 @@ export async function handleRefresh(ctx: Context, env: Env): Promise<void> {
     await getSchema(env.notion, env.kv, true);
   });
   await ctx.reply('Кэш опций обновлён из Notion.');
+}
+
+// --- Голосовое сообщение ---
+
+export async function handleVoice(ctx: Context, env: Env): Promise<void> {
+  const voice = ctx.message?.voice;
+  if (!voice) return;
+  if ((voice.duration ?? 0) > 60) {
+    await ctx.reply('Голосовое слишком длинное (макс 60 сек). Запиши покороче.');
+    return;
+  }
+  await ctx.replyWithChatAction('typing').catch(() => {});
+  const listening = await ctx.reply('🎤 Слушаю...').catch(() => null);
+  try {
+    const file = await ctx.api.getFile(voice.file_id);
+    if (!file.file_path) throw new Error('Не получен путь файла от Telegram');
+    const url = `https://api.telegram.org/file/bot${env.telegramToken}/${file.file_path}`;
+    const audioResp = await fetch(url);
+    if (!audioResp.ok) throw new Error(`Скачивание аудио: ${audioResp.status}`);
+    const buf = await audioResp.arrayBuffer();
+    const schema = await getSchema(env.notion, env.kv);
+
+    // Шаг 1: Whisper → текст
+    const { text, avgLogprob } = await transcribeAudio(env.groqKey, buf, schema);
+    console.log(`[handleVoice] transcript="${text}" avgLogprob=${avgLogprob}`);
+    if (listening) {
+      await ctx.api.deleteMessage(listening.chat.id, listening.message_id).catch(() => {});
+    }
+    if (!text) {
+      await ctx.reply('❌ Не удалось распознать речь. Попробуй ещё раз.');
+      return;
+    }
+    const lowConfidence = typeof avgLogprob === 'number' && avgLogprob < LOW_CONFIDENCE_THRESHOLD;
+    const recognizedMsg = lowConfidence
+      ? `🎤 Распознано: ${text}\n\n⚠️ Уверенность распознавания низкая, проверь команду перед подтверждением.`
+      : `🎤 Распознано: ${text}`;
+    await ctx.reply(recognizedMsg);
+
+    // Шаг 2: текст → intent через Claude
+    const { intent, usage } = await parseIntent(env.anthropicKey, text, schema);
+    return handleParsedIntent(ctx, env, intent, formatUsage(usage));
+  } catch (err: any) {
+    if (listening) {
+      await ctx.api.deleteMessage(listening.chat.id, listening.message_id).catch(() => {});
+    }
+    await ctx.reply(`❌ Ошибка распознавания: ${err?.message ?? err}`);
+  }
 }
 
 // --- Контакт ---
