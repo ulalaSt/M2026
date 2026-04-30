@@ -181,14 +181,58 @@ async function handleShowOrders(
 const KIND_CODE: Record<string, string> = {
   'Взрослый': 'В',
   'Детский': 'Д',
-  'Садик': 'С',
+  'Садик': 'Сад',
 };
 
+function colorPartFromLabel(label: string): string {
+  // Берём всё до первого "-" и убираем пробелы: "🍇 Бд-15M" → "🍇Бд"
+  const idx = label.indexOf('-');
+  const head = idx > 0 ? label.slice(0, idx) : label;
+  return head.replace(/\s+/g, '');
+}
+
 function compactPos(p: FoundPosition): string {
-  if (p.label) return p.label;
-  const colorEmoji = p.color ? p.color.split(/\s/)[0] : '?';
+  const colorPart = p.label ? colorPartFromLabel(p.label) : (p.color ?? '?').split(/\s+/)[0];
   const kindCode = KIND_CODE[p.kind ?? ''] ?? p.kind?.[0] ?? '?';
-  return `${colorEmoji} ${kindCode}-${p.qty ?? '?'}${p.size ?? ''}`;
+  return `${colorPart} ${kindCode}-${p.qty ?? '?'}${p.size ?? ''}`;
+}
+
+function colorEmoji(p: FoundPosition): string {
+  if (p.label) {
+    const idx = p.label.indexOf('-');
+    const head = idx > 0 ? p.label.slice(0, idx) : p.label;
+    return head.split(/\s+/)[0];
+  }
+  return (p.color ?? '?').split(/\s+/)[0];
+}
+
+/** Группирует позиции по цвету+виду, выдаёт строку вида "🟢 В-15M-4S Д-1M 🍇 В-12M" */
+function combinePositions(positions: FoundPosition[]): string {
+  const byColor = new Map<string, Map<string, { size?: string; qty: number }[]>>();
+  const colorOrder: string[] = [];
+  for (const p of positions) {
+    if (!p.qty) continue;
+    const color = colorEmoji(p);
+    if (!byColor.has(color)) {
+      byColor.set(color, new Map());
+      colorOrder.push(color);
+    }
+    const kindMap = byColor.get(color)!;
+    const kindCode = KIND_CODE[p.kind ?? ''] ?? p.kind?.[0] ?? '?';
+    if (!kindMap.has(kindCode)) kindMap.set(kindCode, []);
+    kindMap.get(kindCode)!.push({ size: p.size, qty: p.qty });
+  }
+  const parts: string[] = [];
+  for (const color of colorOrder) {
+    const kindMap = byColor.get(color)!;
+    const segs: string[] = [];
+    for (const [kind, items] of kindMap) {
+      const seg = kind + items.map(i => `-${i.qty}${i.size ?? ''}`).join('');
+      segs.push(seg);
+    }
+    parts.push(`${color} ${segs.join(' ')}`);
+  }
+  return parts.join(' ');
 }
 
 function shortClientId(phone: string): string {
@@ -228,10 +272,7 @@ async function handleShowTimeline(ctx: Context, env: Env, startISO: string, endI
       out.push(day);
       continue;
     }
-    const parts = list.map(c => {
-      const positions = c.positions.map(compactPos).join(' ');
-      return `N${shortClientId(c.phone)}→${positions}`;
-    });
+    const parts = list.map(c => `N${shortClientId(c.phone)}→${combinePositions(c.positions)}`);
     out.push(`${day} ${parts.join('  ')}`);
   }
   // chunk by 4000 chars

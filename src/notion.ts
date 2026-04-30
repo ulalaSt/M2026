@@ -291,6 +291,17 @@ export function extractFormulaString(p: any, key: string): string | undefined {
   return undefined;
 }
 
+/** Берёт первое свойство типа formula с непустым string-значением. */
+export function extractAnyFormula(props: any): string | undefined {
+  for (const key of Object.keys(props ?? {})) {
+    const v = props[key];
+    if (v?.type === 'formula' && v.formula?.type === 'string' && v.formula.string) {
+      return v.formula.string;
+    }
+  }
+  return undefined;
+}
+
 export async function findClientsByPhone(notion: Client, phone: string): Promise<FoundClient[]> {
   const digits = phone.replace(/\D/g, '');
   if (digits.length < 4) return [];
@@ -347,7 +358,7 @@ export async function getPositionsForClient(notion: Client, clientPageId: string
       size: extractSelect(p, 'Размер'),
       kind: extractSelect(p, 'Вид'),
       qty: extractNumber(p, 'Количество'),
-      label: extractFormulaString(p, 'Позиция') ?? extractFormulaString(p, 'Название'),
+      label: extractFormulaString(p, 'Позиция') ?? extractFormulaString(p, 'Название') ?? extractAnyFormula(p),
     };
   });
 }
