@@ -16,14 +16,14 @@ export type AIIntent =
   | {
       intent: 'update_position';
       phone: string;
-      positionIndex: number; // 1-based, ссылается на список из контекста
+      positionId: string; // pageId позиции из контекста
       newColor?: string;
       newSize?: string;
       newKind?: string;
       newQty?: number;
     }
   | { intent: 'add_position'; phone: string; color: string; size: string; kind: string; qty: number }
-  | { intent: 'delete_position'; phone: string; positionIndex: number }
+  | { intent: 'delete_position'; phone: string; positionId: string }
   | { intent: 'show_client'; phone: string; mode?: 'card' | 'receipt' }
   | { intent: 'show_orders'; startDate?: string; endDate?: string; limit?: number; status?: string }
   | { intent: 'show_timeline'; startDate: string; endDate: string }
@@ -45,7 +45,7 @@ const ACTION_PROPERTIES = {
   discount: { type: 'number' },
   note: { type: 'string' },
   // update_position / delete_position
-  positionIndex: { type: 'number', description: '1-based индекс из списка позиций клиента' },
+  positionId: { type: 'string', description: 'ID позиции из контекста клиента (поле id=...)' },
   newColor: { type: 'string' },
   newSize: { type: 'string' },
   newKind: { type: 'string' },
@@ -97,17 +97,38 @@ function buildSystemPrompt(schema: Schema): string {
 - kinds: ${schema.kinds.join(', ')}
 
 Действия (atom-операции):
-- update_client — изменить любые поля клиента: date, time, school, status, addPaid (прибавить к оплачено), setPaid (установить оплачено), discount, note. Можно несколько полей одновременно.
-- update_position — изменить ОДНУ позицию по индексу: positionIndex + newColor/newSize/newKind/newQty.
+- update_client — поля клиента: date, time, school, status, addPaid (прибавить к оплачено), setPaid (поставить точно), discount, note.
+- update_position — изменить ОДНУ позицию по positionId (бери поле id=... из списка в контексте) + newColor/newSize/newKind/newQty.
 - add_position — добавить новую позицию: color, size, kind, qty.
-- delete_position — удалить позицию по индексу.
-- show_client (mode='card'|'receipt'), show_orders (startDate/endDate/limit), show_timeline (startDate/endDate), unclear (reason).
+- delete_position — удалить позицию по positionId.
+- show_client / show_orders / show_timeline / unclear.
 
-Принцип: разлагай сложное на простое и возвращай массивом.
-- "поменяй все M на L" с 3 позициями M → массив из 3 update_position с newSize='L'.
-- "перенеси 5 M на S" → 2 действия: update_position у источника (newQty = старое-5) + add_position {size:'S', qty:5} с тем же color/kind.
-- "5566 забрал и доплатил 2000" → 1 update_client {status:'ЗАБРАЛИ', addPaid:2000}.
-- Если в команде есть несколько изменений — обязательно делай массив, а не задавай уточняющие вопросы.
+ГЛАВНЫЙ ПРИНЦИП: видишь актуальный список позиций клиента в контексте. Сам решай по ним — пользователь говорит на естественном языке, не по индексам.
+
+Жаргон и правила:
+- "+N <вид> <размер> <цвет>" / "+1 студент" / "ещё 5 детских" → add_position. Если каких-то атрибутов нет — бери из существующих позиций клиента (например "+1 студент стандарт тот же цвет" → color совпадает с цветом существующих позиций; "стандарт"=M).
+- "-N человека" / "-2 шт" → уменьшить на N. Если 1 подходящая позиция → update_position c newQty=qty-N. Если станет 0 → delete_position.
+- "поменяй на <X>" / "все берут <X>" / "все на <X>" → меняем у ВСЕХ подходящих позиций (массив update_position). "все берут стандарт"=newSize=M для всех. "поменяй на красный"=newColor=красный для всех.
+- "<N> человек поменяли/решили взять <Y>" / "<N> на <Y>" → split: одна позиция-источник (бери самую большую подходящую), update_position { newQty: qty-N } + add_position { ...атрибуты источника, перезаписываем чем поменяли, qty=N }.
+- "убрать <X>" / "удалить <X>" → delete_position для всех совпадающих.
+- "стандарт"="M", "маленький"="S", "большой"="L".
+- "студент"="Взрослый". "школьник"="Детский". "малыш"/"садик"="Садик".
+
+Примеры (контекст: позиции id=A1 🟢 зелёный M Взрослый ×10, id=B2 🟢 зелёный L Взрослый ×8):
+- "5566 поменяй на красный цвет" → 2 update_position: positionId=A1 newColor=🔴, positionId=B2 newColor=🔴.
+- "5566 4 человека поменяли на маленький" → 2 действия: update_position positionId=A1 newQty=6, add_position {🟢 S Взрослый ×4}.
+- "5566 -2 человека" → 1 update_position у позиции с большим qty (positionId=A1) newQty=8.
+- "5566 +1 студент" — есть позиции → add_position { цвет/размер с самой большой, kind=Взрослый, qty=1 }.
+- "5566 все берут стандарт" → update_position для тех у кого size != M.
+- "5566 +1 детский стандарт тот же цвет" → add_position {🟢 M Детский ×1}.
+- "5566 убрать детский" → delete_position positionId=... для всех с kind=Детский.
+- "5566 5 решили взять синий" → update_position positionId=A1 newQty=5, add_position {🔵 M Взрослый ×5}.
+
+ВАЖНО:
+- Если есть выбор какой источник для split/уменьшения — бери самую большую по qty подходящую позицию.
+- Если есть выбор куда применить (несколько подходят) — применяй ко всем.
+- Уточняющий вопрос задавай ТОЛЬКО если ну никак не вывести — например "+1 студент" без позиций у клиента.
+- Не выдумывай цвета/размеры/виды — только из списков выше.
 
 Понимаешь русский и казахский. Маппинг (выбирай ближайшее из списков):
 - "забрал/получил/выдан" / каз. "алып кетті/алды/берді" → ЗАБРАЛИ
@@ -243,8 +264,8 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       return r;
     }
     case 'update_position': {
-      const idx = typeof args.positionIndex === 'number' ? args.positionIndex : NaN;
-      if (!Number.isFinite(idx) || idx < 1) return { intent: 'unclear', reason: 'Не указан positionIndex' };
+      const id = typeof args.positionId === 'string' ? args.positionId.trim() : '';
+      if (!id) return { intent: 'unclear', reason: 'Не указан positionId' };
       const newColor = validate(args.newColor, schema.colors);
       const newSize = validate(args.newSize, schema.sizes);
       const newKind = validate(args.newKind, schema.kinds);
@@ -252,7 +273,7 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       if (!newColor && !newSize && !newKind && newQty === undefined) {
         return { intent: 'unclear', reason: 'Не указано что менять у позиции' };
       }
-      return { intent: 'update_position', phone, positionIndex: idx, newColor, newSize, newKind, newQty };
+      return { intent: 'update_position', phone, positionId: id, newColor, newSize, newKind, newQty };
     }
     case 'add_position': {
       const color = validate(args.color, schema.colors);
@@ -265,9 +286,9 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       return { intent: 'add_position', phone, color, size, kind, qty };
     }
     case 'delete_position': {
-      const idx = typeof args.positionIndex === 'number' ? args.positionIndex : NaN;
-      if (!Number.isFinite(idx) || idx < 1) return { intent: 'unclear', reason: 'Не указан positionIndex' };
-      return { intent: 'delete_position', phone, positionIndex: idx };
+      const id = typeof args.positionId === 'string' ? args.positionId.trim() : '';
+      if (!id) return { intent: 'unclear', reason: 'Не указан positionId' };
+      return { intent: 'delete_position', phone, positionId: id };
     }
     case 'show_client': {
       if (!phone) return { intent: 'unclear', reason: 'Не указан телефон' };

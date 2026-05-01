@@ -297,9 +297,9 @@ function buildClientContext(c: FoundClient): string {
   if (c.note) lines.push(`Примечание: ${c.note}`);
   if (c.positions.length) {
     lines.push(`Позиции (${c.positions.length}):`);
-    c.positions.forEach((p, i) => {
-      lines.push(`  [${i + 1}] ${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`);
-    });
+    for (const p of c.positions) {
+      lines.push(`  - id=${p.pageId} ${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`);
+    }
   }
   return lines.join('\n');
 }
@@ -443,9 +443,9 @@ export async function handleParsedActions(
       // Notion: если приходит несколько update_client подряд, мерджим в один update_client op
       updateClientChanges = { ...updateClientChanges, ...ch };
     } else if (a.intent === 'update_position') {
-      const pos = client.positions[a.positionIndex - 1];
+      const pos = client.positions.find(p => p.pageId === a.positionId);
       if (!pos) {
-        await ctx.reply(`❌ Нет позиции с индексом ${a.positionIndex}.`);
+        await ctx.reply(`❌ Позиция id=${a.positionId} не найдена у клиента.`);
         return;
       }
       const ch: Record<string, any> = {};
@@ -460,18 +460,18 @@ export async function handleParsedActions(
         kind: a.newKind ?? pos.kind,
         qty: a.newQty ?? pos.qty,
       });
-      descLines.push(`✏ Поз. [${a.positionIndex}]: ${formatPos(pos)} → ${after}`);
+      descLines.push(`✏ ${formatPos(pos)} → ${after}`);
     } else if (a.intent === 'add_position') {
       ops.push({ type: 'add_position', pos: { color: a.color, size: a.size, kind: a.kind, qty: a.qty } });
       descLines.push(`➕ Позиция: ${a.color} ${a.size} ${a.kind} ×${a.qty}`);
     } else if (a.intent === 'delete_position') {
-      const pos = client.positions[a.positionIndex - 1];
+      const pos = client.positions.find(p => p.pageId === a.positionId);
       if (!pos) {
-        await ctx.reply(`❌ Нет позиции с индексом ${a.positionIndex}.`);
+        await ctx.reply(`❌ Позиция id=${a.positionId} не найдена у клиента.`);
         return;
       }
       ops.push({ type: 'archive_position', positionPageId: pos.pageId });
-      descLines.push(`🗑 Удалить поз. [${a.positionIndex}]: ${formatPos(pos)}`);
+      descLines.push(`🗑 Удалить: ${formatPos(pos)}`);
     }
   }
 
