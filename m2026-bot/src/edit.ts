@@ -391,7 +391,12 @@ export async function handleParsedActions(
     return;
   }
 
-  // Все edit-действия должны относиться к одному клиенту
+  // Если в actions телефон не указан, но есть prefetched клиент — подставляем его
+  if (prefetched) {
+    for (const a of editActions) {
+      if (!(a as any).phone) (a as any).phone = prefetched.phone;
+    }
+  }
   const phones = new Set(editActions.map(a => (a as any).phone).filter(Boolean));
   if (phones.size === 0) {
     await ctx.reply(`❌ Не указан телефон клиента.\n\n${usageLine}`);

@@ -167,12 +167,17 @@ export type ParseResult =
   | { kind: 'actions'; actions: AIIntent[]; usage: Usage }
   | { kind: 'question'; text: string; usage: Usage };
 
-/** Извлекает «телефонную» строку из произвольного текста. Любая последовательность 4+ цифр. */
+/** Извлекает «телефонную» строку из произвольного текста. */
 export function extractPhoneFromText(text: string): string | null {
-  const m = text.match(/(\+?\d[\d\s\-()]{3,}\d)/);
-  if (!m) return null;
-  const digits = m[1].replace(/\D/g, '');
-  return digits.length >= 4 ? digits : null;
+  // Сначала пробуем длинный телефон с разделителями (+7 777 444 5566, 87778258091)
+  const long = text.match(/\+?\d[\d\s\-()]{8,}\d/);
+  if (long) {
+    const d = long[0].replace(/\D/g, '');
+    if (d.length >= 10) return d;
+  }
+  // Иначе ищем любую группу из 4+ подряд цифр (например "5566")
+  const short = text.match(/\d{4,}/);
+  return short ? short[0] : null;
 }
 
 export async function parseIntent(

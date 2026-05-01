@@ -6,3 +6,8 @@ node_modules/
 dist/
 .claude/
 *.tsbuildinfo
+
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
