@@ -125,6 +125,7 @@ function buildSystemPrompt(schema: Schema): string {
 - "5566 5 решили взять синий" → update_position positionId=A1 newQty=5, add_position {🔵 M Взрослый ×5}.
 
 ВАЖНО:
+- Позиции уникальны по тройке (color, size, kind). НЕ создавай add_position если уже есть такая — вместо этого делай update_position с newQty = текущее + N. Аналогично, если update_position приведёт к совпадению с другой существующей по (color,size,kind) — объединяй: одну update_position поднять до суммы, другую delete_position.
 - Если есть выбор какой источник для split/уменьшения — бери самую большую по qty подходящую позицию.
 - Если есть выбор куда применить (несколько подходят) — применяй ко всем.
 - Уточняющий вопрос задавай ТОЛЬКО если ну никак не вывести — например "+1 студент" без позиций у клиента.
@@ -169,15 +170,14 @@ export type ParseResult =
 
 /** Извлекает «телефонную» строку из произвольного текста. */
 export function extractPhoneFromText(text: string): string | null {
-  // Сначала пробуем длинный телефон с разделителями (+7 777 444 5566, 87778258091)
-  const long = text.match(/\+?\d[\d\s\-()]{8,}\d/);
-  if (long) {
-    const d = long[0].replace(/\D/g, '');
-    if (d.length >= 10) return d;
+  // Берём все блоки из цифр и разделителей, выбираем самый длинный с >=4 цифр
+  const matches = text.match(/[\d\s\-+()]+/g) ?? [];
+  let best = '';
+  for (const m of matches) {
+    const d = m.replace(/\D/g, '');
+    if (d.length >= 4 && d.length > best.length) best = d;
   }
-  // Иначе ищем любую группу из 4+ подряд цифр (например "5566")
-  const short = text.match(/\d{4,}/);
-  return short ? short[0] : null;
+  return best || null;
 }
 
 export async function parseIntent(

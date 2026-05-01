@@ -489,7 +489,90 @@ export async function handleParsedActions(
     return;
   }
 
-  await saveAndPrompt(ctx, env, client, descLines.join('\n'), usageLine, ops);
+  // Защита: мержим дубликаты позиций по (color,size,kind) — AI не всегда видит это.
+  const merged = mergeDuplicatePositions(client, ops, descLines);
+
+  await saveAndPrompt(ctx, env, client, merged.descLines.join('\n'), usageLine, merged.ops);
+}
+
+/** Симулирует состояние позиций после ops и сливает дубликаты по (color,size,kind). */
+function mergeDuplicatePositions(
+  client: FoundClient,
+  ops: PendingOp[],
+  descLines: string[],
+): { ops: PendingOp[]; descLines: string[] } {
+  type Virt = { pageId?: string; color?: string; size?: string; kind?: string; qty: number; isNew: boolean; archived: boolean };
+  const virt: Virt[] = client.positions.map(p => ({
+    pageId: p.pageId, color: p.color, size: p.size, kind: p.kind, qty: p.qty ?? 0, isNew: false, archived: false,
+  }));
+  for (const op of ops) {
+    if (op.type === 'update_position') {
+      const v = virt.find(x => x.pageId === op.positionPageId);
+      if (v) {
+        if ('color' in op.changes) v.color = op.changes.color;
+        if ('size' in op.changes) v.size = op.changes.size;
+        if ('kind' in op.changes) v.kind = op.changes.kind;
+        if ('qty' in op.changes) v.qty = op.changes.qty;
+      }
+    } else if (op.type === 'archive_position') {
+      const v = virt.find(x => x.pageId === op.positionPageId);
+      if (v) v.archived = true;
+    } else if (op.type === 'add_position') {
+      virt.push({ ...op.pos, qty: op.pos.qty ?? 0, isNew: true, archived: false });
+    }
+  }
+  // Группируем активные по (color,size,kind)
+  const groups = new Map<string, Virt[]>();
+  for (const v of virt) {
+    if (v.archived) continue;
+    const key = `${v.color}|${v.size}|${v.kind}`;
+    const arr = groups.get(key) ?? [];
+    arr.push(v);
+    groups.set(key, arr);
+  }
+  let mergedAny = false;
+  for (const arr of groups.values()) {
+    if (arr.length < 2) continue;
+    mergedAny = true;
+    // Оставляем одну существующую (или первую) как «основную», остальные сливаем в неё
+    arr.sort((a, b) => Number(a.isNew) - Number(b.isNew)); // существующие первыми
+    const main = arr[0];
+    const sumQty = arr.reduce((s, v) => s + v.qty, 0);
+    main.qty = sumQty;
+    for (let i = 1; i < arr.length; i++) arr[i].archived = true;
+  }
+  if (!mergedAny) return { ops, descLines };
+  // Перестраиваем ops из virt
+  const newOps: PendingOp[] = [];
+  // обновления для существующих
+  for (const v of virt) {
+    if (!v.pageId) continue;
+    const orig = client.positions.find(p => p.pageId === v.pageId)!;
+    if (v.archived) {
+      newOps.push({ type: 'archive_position', positionPageId: v.pageId });
+      continue;
+    }
+    const ch: Record<string, any> = {};
+    if (v.color !== orig.color) ch.color = v.color;
+    if (v.size !== orig.size) ch.size = v.size;
+    if (v.kind !== orig.kind) ch.kind = v.kind;
+    if (v.qty !== (orig.qty ?? 0)) ch.qty = v.qty;
+    if (Object.keys(ch).length) newOps.push({ type: 'update_position', positionPageId: v.pageId, changes: ch });
+  }
+  // новые
+  for (const v of virt) {
+    if (v.pageId || v.archived) continue;
+    if (!v.color || !v.size || !v.kind) continue;
+    newOps.push({ type: 'add_position', pos: { color: v.color, size: v.size, kind: v.kind, qty: v.qty } });
+  }
+  // Сохраняем update_client как был
+  const clientOp = ops.find(o => o.type === 'update_client');
+  if (clientOp) newOps.unshift(clientOp);
+  // Описание изменилось — добавляем пометку
+  return {
+    ops: newOps,
+    descLines: [...descLines, '🔀 Дубликаты позиций объединены автоматически'],
+  };
 }
 
 export async function handleParsedIntent(ctx: Context, env: Env, intent: AIIntent, usageLine: string, prefetched?: FoundClient): Promise<void> {
