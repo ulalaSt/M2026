@@ -125,10 +125,11 @@ function buildSystemPrompt(schema: Schema): string {
 - "5566 5 решили взять синий" → update_position positionId=A1 newQty=5, add_position {🔵 M Взрослый ×5}.
 
 ВАЖНО:
+- ДЕЙСТВУЙ когда ответ можно вывести из контекста, НЕ ЗАДАВАЙ ВОПРОС. Если у клиента все позиции одного цвета/вида и пользователь добавляет позицию без указания цвета/вида — просто бери эти значения. Если в команде несколько действий через "и"/запятую — возвращай массив.
 - Позиции уникальны по тройке (color, size, kind). НЕ создавай add_position если уже есть такая — вместо этого делай update_position с newQty = текущее + N. Аналогично, если update_position приведёт к совпадению с другой существующей по (color,size,kind) — объединяй: одну update_position поднять до суммы, другую delete_position.
 - Если есть выбор какой источник для split/уменьшения — бери самую большую по qty подходящую позицию.
 - Если есть выбор куда применить (несколько подходят) — применяй ко всем.
-- Уточняющий вопрос задавай ТОЛЬКО если ну никак не вывести — например "+1 студент" без позиций у клиента.
+- Уточняющий вопрос задавай ТОЛЬКО если ну никак не вывести — например "+1 студент" без позиций у клиента, или цвета у разных позиций различаются и невозможно понять какой брать.
 - Не выдумывай цвета/размеры/виды — только из списков выше.
 
 Понимаешь русский и казахский. Маппинг (выбирай ближайшее из списков):
@@ -170,14 +171,23 @@ export type ParseResult =
 
 /** Извлекает «телефонную» строку из произвольного текста. */
 export function extractPhoneFromText(text: string): string | null {
-  // Берём все блоки из цифр и разделителей, выбираем самый длинный с >=4 цифр
-  const matches = text.match(/[\d\s\-+()]+/g) ?? [];
-  let best = '';
-  for (const m of matches) {
+  const candidates: string[] = [];
+  // Длинный телефон с пробелами/разделителями (≥10 цифр)
+  for (const m of text.match(/\+?\d[\d\s\-()]{8,}\d/g) ?? []) {
     const d = m.replace(/\D/g, '');
-    if (d.length >= 4 && d.length > best.length) best = d;
+    if (d.length >= 10) candidates.push(d);
   }
-  return best || null;
+  // Короткий с дефисами (без пробелов): "55-55", "12-34"
+  for (const m of text.match(/\d[\d\-]{2,}\d/g) ?? []) {
+    const d = m.replace(/\D/g, '');
+    if (d.length >= 4) candidates.push(d);
+  }
+  // Просто 4+ подряд идущих цифр
+  for (const m of text.match(/\d{4,}/g) ?? []) {
+    candidates.push(m);
+  }
+  if (!candidates.length) return null;
+  return candidates.reduce((a, b) => b.length > a.length ? b : a);
 }
 
 export async function parseIntent(

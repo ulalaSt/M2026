@@ -313,30 +313,36 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
   try {
     const schema = await getSchema(env.notion, env.kv);
 
-    // Pre-fetch: только при старте треда (чтобы не дёргать Notion на каждое уточнение)
+    // Pre-fetch на каждом ходу: ищем телефон в текущем тексте, затем в истории
     let prefetchedClient: FoundClient | undefined;
     let clientContext: string | undefined;
-    if (history.length === 0) {
-      const phone = extractPhoneFromText(text);
-      if (phone) {
-        const candidates = await findClientsByPhone(env.notion, phone);
-        if (candidates.length === 1) {
-          prefetchedClient = candidates[0];
-          clientContext = buildClientContext(prefetchedClient);
-        } else if (candidates.length > 1) {
-          // Сохраняем оригинальный текст и список кандидатов; пользователь выбирает кнопкой
-          session.aiPickContext = { text, expiresAt: Date.now() + THREAD_TTL_MS };
-          await saveSession(env.kv, userId, session);
-          await env.kv.put(`aipick:${userId}`, JSON.stringify(candidates), { expirationTtl: 600 });
-          const kb = new InlineKeyboard();
-          for (const c of candidates) {
-            const label = `${c.phone}${c.school ? ' · ' + c.school : ''}${c.date ? ' · ' + c.date : ''}`;
-            kb.text(label.slice(0, 60), `aipick:${c.pageId}`).row();
-          }
-          kb.text('❌ Отмена', 'aipick:cancel');
-          await ctx.reply(`Найдено ${candidates.length} клиентов. Выберите для команды «${text.slice(0, 60)}»:`, { reply_markup: kb });
-          return;
+    let phone = extractPhoneFromText(text);
+    if (!phone) {
+      // ищем в истории (предыдущие сообщения пользователя)
+      for (const m of history) {
+        if (m.role !== 'user') continue;
+        const p = extractPhoneFromText(m.content);
+        if (p) { phone = p; break; }
+      }
+    }
+    if (phone) {
+      const candidates = await findClientsByPhone(env.notion, phone);
+      if (candidates.length === 1) {
+        prefetchedClient = candidates[0];
+        clientContext = buildClientContext(prefetchedClient);
+      } else if (candidates.length > 1 && history.length === 0) {
+        // Несколько кандидатов на старте треда — даём пикер
+        session.aiPickContext = { text, expiresAt: Date.now() + THREAD_TTL_MS };
+        await saveSession(env.kv, userId, session);
+        await env.kv.put(`aipick:${userId}`, JSON.stringify(candidates), { expirationTtl: 600 });
+        const kb = new InlineKeyboard();
+        for (const c of candidates) {
+          const label = `${c.phone}${c.school ? ' · ' + c.school : ''}${c.date ? ' · ' + c.date : ''}`;
+          kb.text(label.slice(0, 60), `aipick:${c.pageId}`).row();
         }
+        kb.text('❌ Отмена', 'aipick:cancel');
+        await ctx.reply(`Найдено ${candidates.length} клиентов. Выберите для команды «${text.slice(0, 60)}»:`, { reply_markup: kb });
+        return;
       }
     }
 
