@@ -323,6 +323,19 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
         if (candidates.length === 1) {
           prefetchedClient = candidates[0];
           clientContext = buildClientContext(prefetchedClient);
+        } else if (candidates.length > 1) {
+          // Сохраняем оригинальный текст и список кандидатов; пользователь выбирает кнопкой
+          session.aiPickContext = { text, expiresAt: Date.now() + THREAD_TTL_MS };
+          await saveSession(env.kv, userId, session);
+          await env.kv.put(`aipick:${userId}`, JSON.stringify(candidates), { expirationTtl: 600 });
+          const kb = new InlineKeyboard();
+          for (const c of candidates) {
+            const label = `${c.phone}${c.school ? ' · ' + c.school : ''}${c.date ? ' · ' + c.date : ''}`;
+            kb.text(label.slice(0, 60), `aipick:${c.pageId}`).row();
+          }
+          kb.text('❌ Отмена', 'aipick:cancel');
+          await ctx.reply(`Найдено ${candidates.length} клиентов. Выберите для команды «${text.slice(0, 60)}»:`, { reply_markup: kb });
+          return;
         }
       }
     }
@@ -338,7 +351,8 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
       ];
       session.aiThread = { messages: newMessages, expiresAt: Date.now() + THREAD_TTL_MS };
       await saveSession(env.kv, userId, session);
-      await ctx.reply(`💬 ${r.text}\n\n${usageLine}`);
+      const kb = new InlineKeyboard().text('❌ Отмена', 'ai:cancel');
+      await ctx.reply(`💬 ${r.text}\n\n${usageLine}`, { reply_markup: kb });
       return;
     }
 
@@ -639,6 +653,66 @@ export async function cancelPendingEdit(ctx: Context, env: Env): Promise<void> {
   const userId = ctx.from!.id;
   await clearSession(env.kv, userId);
   await ctx.reply('Отменено.');
+}
+
+export async function cancelAIThread(ctx: Context, env: Env): Promise<void> {
+  const userId = ctx.from!.id;
+  const session = await getSession(env.kv, userId);
+  delete session.aiThread;
+  delete session.aiPickContext;
+  await saveSession(env.kv, userId, session);
+  await env.kv.delete(`aipick:${userId}`);
+  await ctx.reply('Отменено.');
+}
+
+export async function pickAIClient(ctx: Context, env: Env, pageIdOrCancel: string): Promise<void> {
+  const userId = ctx.from!.id;
+  if (pageIdOrCancel === 'cancel') {
+    return cancelAIThread(ctx, env);
+  }
+  const session = await getSession(env.kv, userId);
+  const pickCtx = session.aiPickContext;
+  if (!pickCtx || pickCtx.expiresAt < Date.now()) {
+    await ctx.reply('Сессия истекла. Повтори запрос.');
+    delete session.aiPickContext;
+    await saveSession(env.kv, userId, session);
+    return;
+  }
+  const stored = await env.kv.get<FoundClient[]>(`aipick:${userId}`, 'json');
+  const found = stored?.find(c => c.pageId === pageIdOrCancel);
+  if (!found) {
+    await ctx.reply('Клиент не найден в выборке.');
+    return;
+  }
+  // Чистим pick-контекст и зовём AI с этим клиентом как prefetched
+  delete session.aiPickContext;
+  await saveSession(env.kv, userId, session);
+  await env.kv.delete(`aipick:${userId}`);
+
+  // Передаём текст оригинального запроса с предзагруженным клиентом
+  const text = pickCtx.text;
+  try {
+    const schema = await getSchema(env.notion, env.kv);
+    const clientContext = buildClientContext(found);
+    const r = await parseIntent(env.anthropicKey, text, schema, [], clientContext);
+    const usageLine = formatUsage(r.usage);
+    if (r.kind === 'question') {
+      session.aiThread = {
+        messages: [
+          { role: 'user', content: text },
+          { role: 'assistant', content: r.text },
+        ],
+        expiresAt: Date.now() + THREAD_TTL_MS,
+      };
+      await saveSession(env.kv, userId, session);
+      const kb = new InlineKeyboard().text('❌ Отмена', 'ai:cancel');
+      await ctx.reply(`💬 ${r.text}\n\n${usageLine}`, { reply_markup: kb });
+      return;
+    }
+    return handleParsedActions(ctx, env, r.actions, usageLine, found);
+  } catch (err: any) {
+    await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
+  }
 }
 
 // pickPosition больше не нужен — AI ссылается на позиции по индексам напрямую.

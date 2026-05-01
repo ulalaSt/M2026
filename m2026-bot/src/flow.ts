@@ -3,7 +3,7 @@ import { Client as NotionClient } from '@notionhq/client';
 import { Session, getSession, saveSession, clearSession, emptySession, DraftPosition, DraftClient } from './session';
 import { getSchema, Schema } from './schema';
 import { createClientWithPositions, searchClients, searchClientsByDateRange, updateClientStatus, archiveClient, loadClientPositions, updateClientFull, getClient, ClientSummary } from './notion';
-import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition } from './edit';
+import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition, pickAIClient, cancelAIThread } from './edit';
 import { transcribeAudio, LOW_CONFIDENCE_THRESHOLD } from './voice';
 
 type Env = {
@@ -397,10 +397,10 @@ export async function handleText(ctx: Context, env: Env): Promise<void> {
     }
 
     default: {
-      const looksLikePhoneOnly = /^[+\d\s\-()]+$/.test(text);
-      const normalized = looksLikePhoneOnly ? normalizePhone(text) : null;
-      if (normalized) {
-        const results = await withLoading(ctx, '⏳ Ищу...', () => searchClients(env.notion, normalized));
+      const phoneOnly = /^[+\d\s\-()]+$/.test(text);
+      const digits = text.replace(/\D/g, '');
+      if (phoneOnly && digits.length >= 4) {
+        const results = await withLoading(ctx, '⏳ Ищу...', () => searchClients(env.notion, digits));
         if (results.length === 1) {
           await env.kv.put(`pick:${userId}`, JSON.stringify(results), { expirationTtl: 600 });
           return showClientCard(ctx, env, session, results[0]);
@@ -415,13 +415,10 @@ export async function handleText(ctx: Context, env: Env): Promise<void> {
           await ctx.reply(`Найдено ${results.length}. Выберите:`, { reply_markup: kb });
           return;
         }
-        // не найдено — начинаем создание с уже введённым номером
-        const fresh = emptySession();
-        fresh.draft.phone = normalized;
-        await ctx.reply(`Клиент с номером ${normalized} не найден. Создаю нового.`);
-        return askDate(ctx, env, fresh);
+        await ctx.reply(`❌ Клиент не найден по запросу «${text}».`);
+        return;
       }
-      // не телефон — пробуем как AI-команду на естественном языке
+      // Естественный язык → AI
       return withLoading(ctx, '🤖 Думаю...', () => handleAIMessage(ctx, env, text));
     }
   }
@@ -563,6 +560,23 @@ export async function handleCallback(ctx: Context, env: Env): Promise<void> {
       }
       await showChoice(ctx, 'Позиция выбрана');
       return pickPosition(ctx, env, value);
+    }
+
+    case 'aipick': {
+      if (value === 'cancel') {
+        await showChoice(ctx, 'Отменено');
+        return cancelAIThread(ctx, env);
+      }
+      await showChoice(ctx, 'Клиент выбран');
+      return pickAIClient(ctx, env, value);
+    }
+
+    case 'ai': {
+      if (value === 'cancel') {
+        await showChoice(ctx, 'Отменено');
+        return cancelAIThread(ctx, env);
+      }
+      return;
     }
 
     case 'orders': {

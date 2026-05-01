@@ -102,6 +102,10 @@ export type Session = {
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
     expiresAt: number;
   };
+  aiPickContext?: {
+    text: string;
+    expiresAt: number;
+  };
 };
 
 const EMPTY_DRAFT: DraftClient = { positions: [] };

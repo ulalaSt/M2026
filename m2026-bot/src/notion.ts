@@ -78,16 +78,26 @@ export async function getClient(notion: Client, pageId: string): Promise<ClientS
 
 export async function searchClients(notion: Client, query: string): Promise<ClientSummary[]> {
   const digits = query.replace(/\D/g, '');
-  if (!digits) return [];
+  if (digits.length < 4) return [];
+  // Notion title.contains не учитывает разделители (в номере могут быть пробелы/дефисы),
+  // поэтому ищем по короткому хвосту цифр (last 4) — он почти всегда хранится непрерывно.
+  // Затем фильтруем точно по last10 цифр клиента.
+  const last10 = digits.slice(-10);
+  const search = digits.slice(-4);
   const response: any = await notion.request({
     path: `data_sources/${dbIds.m2026}/query`,
     method: 'post',
     body: {
-      filter: { property: 'НОМЕР', title: { contains: digits } },
+      filter: { property: 'НОМЕР', title: { contains: search } },
       page_size: 20,
     },
   });
-  return (response.results ?? []).map(parseClientPage);
+  return (response.results ?? [])
+    .filter((page: any) => {
+      const t = page.properties?.['НОМЕР']?.title?.[0]?.plain_text ?? '';
+      return t.replace(/\D/g, '').endsWith(last10);
+    })
+    .map(parseClientPage);
 }
 
 function parseClientPage(page: any): ClientSummary {
