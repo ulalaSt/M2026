@@ -24,6 +24,18 @@ export type AIIntent =
     }
   | { intent: 'add_position'; phone: string; color: string; size: string; kind: string; qty: number }
   | { intent: 'delete_position'; phone: string; positionId: string }
+  | {
+      intent: 'create_client';
+      phone: string;
+      school?: string;
+      date?: string;
+      time?: string;
+      price?: number;
+      paid?: number;
+      discount?: number;
+      note?: string;
+      positions: Array<{ color: string; size: string; kind: string; qty: number }>;
+    }
   | { intent: 'show_client'; phone: string; mode?: 'card' | 'receipt' }
   | {
       intent: 'query_orders';
@@ -39,7 +51,7 @@ export type AIIntent =
 const ACTION_PROPERTIES = {
   intent: {
     type: 'string',
-    enum: ['update_client', 'update_position', 'add_position', 'delete_position', 'show_client', 'query_orders', 'unclear'],
+    enum: ['update_client', 'update_position', 'add_position', 'delete_position', 'create_client', 'show_client', 'query_orders', 'unclear'],
   },
   phone: { type: 'string', description: 'Телефон клиента или последние цифры. Пусто если не указан.' },
   // update_client поля
@@ -80,6 +92,19 @@ const ACTION_PROPERTIES = {
   sorts: { type: 'array', description: 'Notion sorts: [{property, direction}]', items: { type: 'object' } },
   view: { type: 'string', enum: ['list', 'timeline'], description: 'list = плоский список, timeline = по дням' },
   title: { type: 'string', description: 'Заголовок выдачи для пользователя (например "Заказы на май")' },
+  positions: {
+    type: 'array',
+    description: 'Массив позиций для create_client',
+    items: {
+      type: 'object',
+      properties: {
+        color: { type: 'string' },
+        size: { type: 'string' },
+        kind: { type: 'string' },
+        qty: { type: 'number' },
+      },
+    },
+  },
   // unclear
   reason: { type: 'string' },
 } as const;
@@ -121,6 +146,7 @@ function buildSystemPrompt(schema: Schema): string {
 - update_position — изменить ОДНУ позицию по positionId (бери поле id=... из списка в контексте) + newColor/newSize/newKind/newQty.
 - add_position — добавить новую позицию: color, size, kind, qty.
 - delete_position — удалить позицию по positionId.
+- create_client — создать НОВОГО клиента (используй только когда в контексте указано «Клиент не найден»): phone, школа/дата/время/цена/оплачено/скидка/примечание (опционально), positions[] — массив объектов {color, size, kind, qty} (хотя бы 1).
 - show_client (mode='card'|'receipt').
 - query_orders — поиск/фильтрация заказов. Ты сам строишь Notion-фильтр.
 
@@ -229,6 +255,23 @@ export function formatUsage(u: Usage): string {
 
 export type ChatMsg = { role: 'user' | 'assistant'; content: string };
 
+/** fetch с ретраями на 429/529/5xx (Anthropic overloaded и rate limit). */
+async function fetchWithRetry(url: string, init: RequestInit, maxAttempts = 3): Promise<Response> {
+  let lastResp: Response | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const resp = await fetch(url, init);
+    lastResp = resp;
+    if (resp.ok) return resp;
+    if (resp.status !== 429 && resp.status !== 529 && resp.status < 500) return resp;
+    if (attempt === maxAttempts) return resp;
+    // backoff: 500ms, 1500ms, 4500ms
+    const delay = 500 * Math.pow(3, attempt - 1);
+    console.warn(`[AI retry ${attempt}/${maxAttempts}] status=${resp.status}, ждём ${delay}мс`);
+    await new Promise(r => setTimeout(r, delay));
+  }
+  return lastResp!;
+}
+
 export type ParseResult =
   | { kind: 'actions'; actions: AIIntent[]; usage: Usage }
   | { kind: 'question'; text: string; usage: Usage };
@@ -274,7 +317,7 @@ export async function parseIntent(
     tools: [TOOL],
     messages,
   };
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+  const resp = await fetchWithRetry('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -368,6 +411,33 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       const id = typeof args.positionId === 'string' ? args.positionId.trim() : '';
       if (!id) return { intent: 'unclear', reason: 'Не указан positionId' };
       return { intent: 'delete_position', phone, positionId: id };
+    }
+    case 'create_client': {
+      if (!phone) return { intent: 'unclear', reason: 'Для создания нужен телефон' };
+      const positionsRaw = Array.isArray(args.positions) ? args.positions : [];
+      const positions: Array<{ color: string; size: string; kind: string; qty: number }> = [];
+      for (const p of positionsRaw) {
+        const color = validate(p?.color, schema.colors);
+        const size = validate(p?.size, schema.sizes);
+        const kind = validate(p?.kind, schema.kinds);
+        const qty = typeof p?.qty === 'number' ? p.qty : NaN;
+        if (color && size && kind && Number.isFinite(qty) && qty > 0) {
+          positions.push({ color, size, kind, qty });
+        }
+      }
+      if (positions.length === 0) {
+        return { intent: 'unclear', reason: 'Нужна хотя бы одна позиция (цвет/размер/вид/кол-во)' };
+      }
+      const r: any = { intent: 'create_client', phone, positions };
+      if (typeof args.date === 'string') r.date = args.date;
+      if (typeof args.time === 'string') r.time = args.time;
+      const school = validateFuzzy(args.school, schema.schools);
+      if (school) r.school = school;
+      if (typeof args.price === 'number') r.price = args.price;
+      if (typeof args.paid === 'number') r.paid = args.paid;
+      if (typeof args.discount === 'number') r.discount = args.discount;
+      if (typeof args.note === 'string') r.note = args.note;
+      return r;
     }
     case 'show_client': {
       if (!phone) return { intent: 'unclear', reason: 'Не указан телефон' };

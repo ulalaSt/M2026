@@ -12,6 +12,7 @@ import {
   searchClientsByDateRange,
   loadClientPositions,
   queryClients,
+  createClientWithPositions,
   ClientSummary,
   getClient,
   getPositionsForClient,
@@ -22,6 +23,7 @@ import {
   Session,
   PendingEdit,
   PendingOp,
+  DraftClient,
   emptySession,
   getSession,
   saveSession,
@@ -359,6 +361,9 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
         if (history.length === 0) {
           await ctx.reply(`📋 Запрос по контакту:\n${formatFullCard(prefetchedClient)}`);
         }
+      } else if (candidates.length === 0 && phone.length === 11 && (phone.startsWith('7') || phone.startsWith('8'))) {
+        // Полный номер, но клиента нет — кандидат на создание
+        clientContext = `Клиент с номером +${phone.startsWith('8') ? '7' + phone.slice(1) : phone} НЕ НАЙДЕН в базе. Если пользователь хочет создать нового клиента — используй create_client.`;
       } else if (candidates.length > 1 && history.length === 0) {
         // Несколько кандидатов на старте треда — даём пикер
         session.aiPickContext = { text, expiresAt: Date.now() + THREAD_TTL_MS };
@@ -429,6 +434,12 @@ export async function handleParsedActions(
       const body = a.mode === 'receipt' ? formatReceipt(c) : formatFullCard(c);
       await ctx.reply(body);
     }
+  }
+
+  // Создание нового клиента — отдельный поток, ОДИН create_client в actions
+  const createAction = actions.find(a => a.intent === 'create_client');
+  if (createAction && createAction.intent === 'create_client') {
+    return prepareCreateClient(ctx, env, createAction, usageLine, originalText);
   }
 
   const editActions = actions.filter(a =>
@@ -633,6 +644,72 @@ export async function handleParsedIntent(ctx: Context, env: Env, intent: AIInten
   return handleParsedActions(ctx, env, [intent], usageLine, prefetched);
 }
 
+async function prepareCreateClient(
+  ctx: Context,
+  env: Env,
+  intent: Extract<AIIntent, { intent: 'create_client' }>,
+  usageLine: string,
+  originalText?: string,
+): Promise<void> {
+  const userId = ctx.from!.id;
+  // Нормализуем телефон
+  let digits = intent.phone.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('8')) digits = '7' + digits.slice(1);
+  const phone = digits.length === 11 && digits.startsWith('7')
+    ? `+${digits[0]} ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`
+    : intent.phone;
+
+  const draft: DraftClient = {
+    phone,
+    school: intent.school,
+    date: intent.date,
+    time: intent.time,
+    price: intent.price,
+    paid: intent.paid,
+    discount: intent.discount,
+    note: intent.note,
+    positions: intent.positions,
+  };
+
+  const totalQty = intent.positions.reduce((s, p) => s + p.qty, 0);
+  const sum = typeof draft.price === 'number' ? draft.price * totalQty : 0;
+  const remaining = sum - (draft.paid ?? 0) - (draft.discount ?? 0);
+
+  const lines: string[] = [];
+  lines.push('🆕 Новый клиент');
+  lines.push(`📞 ${phone}`);
+  if (draft.school) lines.push(`🏫 ${draft.school}`);
+  if (draft.date) lines.push(`📅 ${draft.date}${draft.time ? ' ' + draft.time : ''}`);
+  if (typeof draft.price === 'number') lines.push(`💵 Цена: ${draft.price} тг`);
+  if (typeof draft.paid === 'number') lines.push(`💰 Оплачено: ${draft.paid} тг`);
+  if (typeof draft.discount === 'number') lines.push(`🏷 Скидка: ${draft.discount} тг`);
+  if (draft.note) lines.push(`💬 ${draft.note}`);
+  lines.push(`📦 Позиции (${intent.positions.length}):`);
+  for (const p of intent.positions) lines.push(`  • ${p.color} ${p.size} ${p.kind} ×${p.qty}`);
+  if (sum > 0) {
+    lines.push(`💵 Сумма: ${sum} тг`);
+    if (remaining !== sum) lines.push(`💸 Остаток: ${remaining} тг`);
+  }
+
+  const session = emptySession();
+  session.step = 'edit_confirm';
+  session.pendingEdit = {
+    clientPageId: '', // не используется для create
+    description: lines.join('\n'),
+    operations: [{ type: 'create_client', draft }],
+    usageLine,
+    originalText,
+    clientPhone: phone,
+  };
+  await saveSession(env.kv, userId, session);
+  const kb = new InlineKeyboard()
+    .text('✅ Создать', 'edit:apply')
+    .text('💬 Комментарий', 'edit:comment')
+    .row()
+    .text('❌ Отмена', 'edit:cancel');
+  await ctx.reply(`${lines.join('\n')}\n\n${usageLine}`, { reply_markup: kb });
+}
+
 async function saveAndPrompt(
   ctx: Context,
   env: Env,
@@ -675,6 +752,7 @@ export async function applyPendingEdit(ctx: Context, env: Env): Promise<void> {
     return;
   }
   try {
+    let createdPageId: string | undefined;
     for (const op of pe.operations) {
       if (op.type === 'update_client') {
         await updateClientPage(env.notion, pe.clientPageId, op.changes);
@@ -684,15 +762,22 @@ export async function applyPendingEdit(ctx: Context, env: Env): Promise<void> {
         await addPositionToClient(env.notion, pe.clientPageId, op.pos);
       } else if (op.type === 'archive_position') {
         await archivePosition(env.notion, op.positionPageId);
+      } else if (op.type === 'create_client') {
+        const result = await createClientWithPositions(env.notion, op.draft);
+        createdPageId = result.pageId;
       }
     }
     await clearSession(env.kv, userId);
     const tail = pe.usageLine ? `\n${pe.usageLine}` : '';
-    await ctx.reply(`✅ Применено: ${pe.description}${tail}`);
-    // Показываем актуальную карточку клиента после изменений
+    const verb = createdPageId ? 'Создано' : 'Применено';
+    await ctx.reply(`✅ ${verb}: ${pe.description}${tail}`);
+    // Показываем свежую карточку
     try {
-      const fresh = await getFoundClient(env.notion, pe.clientPageId);
-      if (fresh) await ctx.reply(formatFullCard(fresh));
+      const targetPageId = createdPageId ?? pe.clientPageId;
+      if (targetPageId) {
+        const fresh = await getFoundClient(env.notion, targetPageId);
+        if (fresh) await ctx.reply(formatFullCard(fresh));
+      }
     } catch {}
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка применения: ${err?.message ?? err}`);
