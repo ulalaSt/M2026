@@ -960,7 +960,7 @@ async function askPosKind(ctx: Context, env: Env, session: Session, first: boole
   await ctx.reply(title, { reply_markup: selectKeyboard(schema.kinds, 'pos_kind', 3) });
 }
 
-async function askExtras(ctx: Context, env: Env, session: Session): Promise<void> {
+export async function askExtras(ctx: Context, env: { kv: KVNamespace }, session: Session): Promise<void> {
   applyDefaults(session.draft);
   session.step = 'extras';
   await saveSession(env.kv, ctx.from!.id, session);

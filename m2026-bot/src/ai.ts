@@ -146,7 +146,7 @@ function buildSystemPrompt(schema: Schema): string {
 - update_position — изменить ОДНУ позицию по positionId (бери поле id=... из списка в контексте) + newColor/newSize/newKind/newQty.
 - add_position — добавить новую позицию: color, size, kind, qty.
 - delete_position — удалить позицию по positionId.
-- create_client — создать НОВОГО клиента (используй только когда в контексте указано «Клиент не найден»): phone, школа/дата/время/цена/оплачено/скидка/примечание (опционально), positions[] — массив объектов {color, size, kind, qty} (хотя бы 1).
+- create_client — создать НОВОГО клиента (используй только когда в контексте указано «Клиент НЕ НАЙДЕН»). Обязательно: phone, date, positions[] (хотя бы 1 позиция с color и qty). Дефолты: kind="Взрослый" если не указан, size="M" если не указан. Опционально: school, time, price (если не указано — бот сам посчитает), paid, discount, note. Школа НЕ обязательна. Если не хватает даты или позиции с количеством — ЗАДАЙ ВОПРОС (без tool call).
 - show_client (mode='card'|'receipt').
 - query_orders — поиск/фильтрация заказов. Ты сам строишь Notion-фильтр.
 
@@ -414,22 +414,27 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
     }
     case 'create_client': {
       if (!phone) return { intent: 'unclear', reason: 'Для создания нужен телефон' };
+      if (typeof args.date !== 'string' || !args.date) {
+        return { intent: 'unclear', reason: 'Не указана дата выдачи' };
+      }
       const positionsRaw = Array.isArray(args.positions) ? args.positions : [];
       const positions: Array<{ color: string; size: string; kind: string; qty: number }> = [];
+      // Дефолты: kind=Взрослый, size=M
+      const defaultKind = schema.kinds.find(k => k === 'Взрослый') ?? schema.kinds[0];
+      const defaultSize = schema.sizes.find(s => s === 'M') ?? schema.sizes[0];
       for (const p of positionsRaw) {
         const color = validate(p?.color, schema.colors);
-        const size = validate(p?.size, schema.sizes);
-        const kind = validate(p?.kind, schema.kinds);
         const qty = typeof p?.qty === 'number' ? p.qty : NaN;
-        if (color && size && kind && Number.isFinite(qty) && qty > 0) {
-          positions.push({ color, size, kind, qty });
-        }
+        if (!color || !Number.isFinite(qty) || qty <= 0) continue;
+        const size = validate(p?.size, schema.sizes) ?? defaultSize;
+        const kind = validate(p?.kind, schema.kinds) ?? defaultKind;
+        if (!size || !kind) continue;
+        positions.push({ color, size, kind, qty });
       }
       if (positions.length === 0) {
-        return { intent: 'unclear', reason: 'Нужна хотя бы одна позиция (цвет/размер/вид/кол-во)' };
+        return { intent: 'unclear', reason: 'Нужна хотя бы одна позиция (минимум цвет и количество)' };
       }
-      const r: any = { intent: 'create_client', phone, positions };
-      if (typeof args.date === 'string') r.date = args.date;
+      const r: any = { intent: 'create_client', phone, date: args.date, positions };
       if (typeof args.time === 'string') r.time = args.time;
       const school = validateFuzzy(args.school, schema.schools);
       if (school) r.school = school;

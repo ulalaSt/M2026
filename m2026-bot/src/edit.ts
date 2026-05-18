@@ -2,6 +2,7 @@ import { Context, InlineKeyboard } from 'grammy';
 import { Client as NotionClient } from '@notionhq/client';
 import { getSchema } from './schema';
 import { parseIntent, AIIntent, formatUsage, Usage, ChatMsg, extractPhoneFromText } from './ai';
+import { askExtras } from './flow';
 import {
   findClientsByPhone,
   updateClientPage,
@@ -648,8 +649,8 @@ async function prepareCreateClient(
   ctx: Context,
   env: Env,
   intent: Extract<AIIntent, { intent: 'create_client' }>,
-  usageLine: string,
-  originalText?: string,
+  _usageLine: string,
+  _originalText?: string,
 ): Promise<void> {
   const userId = ctx.from!.id;
   // Нормализуем телефон
@@ -659,7 +660,9 @@ async function prepareCreateClient(
     ? `+${digits[0]} ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`
     : intent.phone;
 
-  const draft: DraftClient = {
+  // Кладём данные в session.draft и переходим на финальный экран /new flow (askExtras)
+  const session = emptySession();
+  session.draft = {
     phone,
     school: intent.school,
     date: intent.date,
@@ -670,44 +673,8 @@ async function prepareCreateClient(
     note: intent.note,
     positions: intent.positions,
   };
-
-  const totalQty = intent.positions.reduce((s, p) => s + p.qty, 0);
-  const sum = typeof draft.price === 'number' ? draft.price * totalQty : 0;
-  const remaining = sum - (draft.paid ?? 0) - (draft.discount ?? 0);
-
-  const lines: string[] = [];
-  lines.push('🆕 Новый клиент');
-  lines.push(`📞 ${phone}`);
-  if (draft.school) lines.push(`🏫 ${draft.school}`);
-  if (draft.date) lines.push(`📅 ${draft.date}${draft.time ? ' ' + draft.time : ''}`);
-  if (typeof draft.price === 'number') lines.push(`💵 Цена: ${draft.price} тг`);
-  if (typeof draft.paid === 'number') lines.push(`💰 Оплачено: ${draft.paid} тг`);
-  if (typeof draft.discount === 'number') lines.push(`🏷 Скидка: ${draft.discount} тг`);
-  if (draft.note) lines.push(`💬 ${draft.note}`);
-  lines.push(`📦 Позиции (${intent.positions.length}):`);
-  for (const p of intent.positions) lines.push(`  • ${p.color} ${p.size} ${p.kind} ×${p.qty}`);
-  if (sum > 0) {
-    lines.push(`💵 Сумма: ${sum} тг`);
-    if (remaining !== sum) lines.push(`💸 Остаток: ${remaining} тг`);
-  }
-
-  const session = emptySession();
-  session.step = 'edit_confirm';
-  session.pendingEdit = {
-    clientPageId: '', // не используется для create
-    description: lines.join('\n'),
-    operations: [{ type: 'create_client', draft }],
-    usageLine,
-    originalText,
-    clientPhone: phone,
-  };
   await saveSession(env.kv, userId, session);
-  const kb = new InlineKeyboard()
-    .text('✅ Создать', 'edit:apply')
-    .text('💬 Комментарий', 'edit:comment')
-    .row()
-    .text('❌ Отмена', 'edit:cancel');
-  await ctx.reply(`${lines.join('\n')}\n\n${usageLine}`, { reply_markup: kb });
+  return askExtras(ctx, env, session);
 }
 
 async function saveAndPrompt(
