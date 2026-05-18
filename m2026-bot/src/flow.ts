@@ -3,7 +3,7 @@ import { Client as NotionClient } from '@notionhq/client';
 import { Session, getSession, saveSession, clearSession, emptySession, DraftPosition, DraftClient } from './session';
 import { getSchema, Schema } from './schema';
 import { createClientWithPositions, searchClients, searchClientsByDateRange, updateClientStatus, archiveClient, loadClientPositions, updateClientFull, getClient, ClientSummary } from './notion';
-import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition, pickAIClient, cancelAIThread } from './edit';
+import { handleAIMessage, applyPendingEdit, cancelPendingEdit, pickPosition, pickAIClient, cancelAIThread, requestEditComment, handleEditComment } from './edit';
 import { transcribeAudio, LOW_CONFIDENCE_THRESHOLD } from './voice';
 
 type Env = {
@@ -320,6 +320,10 @@ export async function handleText(ctx: Context, env: Env): Promise<void> {
       return session.step === 'edit_note' ? askExtras(ctx, env, session) : askExtras(ctx, env, session);
     }
 
+    case 'edit_comment_input': {
+      return withLoading(ctx, '🤖 Думаю...', () => handleEditComment(ctx, env, text));
+    }
+
     case 'orders_day_input': {
       const iso = parseDate(text);
       if (!iso) {
@@ -549,6 +553,10 @@ export async function handleCallback(ctx: Context, env: Env): Promise<void> {
       if (value === 'cancel') {
         await showChoice(ctx, 'Отменено');
         return cancelPendingEdit(ctx, env);
+      }
+      if (value === 'comment') {
+        await showChoice(ctx, '💬 Комментарий');
+        return requestEditComment(ctx, env);
       }
       return;
     }

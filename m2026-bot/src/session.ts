@@ -41,7 +41,8 @@ export type Step =
   | 'orders_range_start'
   | 'orders_range_end'
   | 'edit_confirm'
-  | 'edit_pick_position';
+  | 'edit_pick_position'
+  | 'edit_comment_input';
 
 export type DraftPosition = {
   color?: string;
@@ -74,6 +75,8 @@ export type PendingEdit = {
   description: string;
   operations: PendingOp[];
   usageLine?: string;
+  originalText?: string; // исходный запрос пользователя — для функции «Комментарий»
+  clientPhone?: string;  // телефон клиента — для повторного prefetch при комментарии
 };
 
 export type PendingChange = {

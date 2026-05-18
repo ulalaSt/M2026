@@ -146,6 +146,23 @@ export async function archiveClient(notion: Client, pageId: string): Promise<voi
   });
 }
 
+export async function queryClients(
+  notion: Client,
+  filter: any | undefined,
+  sorts: any[] | undefined,
+  pageSize = 100,
+): Promise<ClientSummary[]> {
+  const body: any = { page_size: Math.max(1, Math.min(pageSize, 100)) };
+  if (filter) body.filter = filter;
+  if (sorts && sorts.length) body.sorts = sorts;
+  const response: any = await notion.request({
+    path: `data_sources/${dbIds.m2026}/query`,
+    method: 'post',
+    body,
+  });
+  return (response.results ?? []).map(parseClientPage);
+}
+
 export async function searchClientsUpcoming(notion: Client, fromISO: string, limit: number): Promise<ClientSummary[]> {
   const response: any = await notion.request({
     path: `data_sources/${dbIds.m2026}/query`,

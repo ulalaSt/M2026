@@ -25,14 +25,21 @@ export type AIIntent =
   | { intent: 'add_position'; phone: string; color: string; size: string; kind: string; qty: number }
   | { intent: 'delete_position'; phone: string; positionId: string }
   | { intent: 'show_client'; phone: string; mode?: 'card' | 'receipt' }
-  | { intent: 'show_orders'; startDate?: string; endDate?: string; limit?: number; status?: string }
-  | { intent: 'show_timeline'; startDate: string; endDate: string }
+  | {
+      intent: 'query_orders';
+      clientFilter?: any; // Notion-фильтр для М2026 (см. промпт)
+      positionFilter?: { color?: string; size?: string; kind?: string }; // фильтр позиций
+      sorts?: Array<{ property: string; direction: 'ascending' | 'descending' }>;
+      limit?: number;
+      view?: 'list' | 'timeline';
+      title?: string; // заголовок выдачи (например "Заказы на май")
+    }
   | { intent: 'unclear'; reason: string };
 
 const ACTION_PROPERTIES = {
   intent: {
     type: 'string',
-    enum: ['update_client', 'update_position', 'add_position', 'delete_position', 'show_client', 'show_orders', 'show_timeline', 'unclear'],
+    enum: ['update_client', 'update_position', 'add_position', 'delete_position', 'show_client', 'query_orders', 'unclear'],
   },
   phone: { type: 'string', description: 'Телефон клиента или последние цифры. Пусто если не указан.' },
   // update_client поля
@@ -60,6 +67,19 @@ const ACTION_PROPERTIES = {
   startDate: { type: 'string' },
   endDate: { type: 'string' },
   limit: { type: 'number' },
+  clientFilter: { type: 'object', description: 'Notion-фильтр для базы М2026 (см. описание полей и операторов в промпте)' },
+  positionFilter: {
+    type: 'object',
+    description: 'Фильтр позиций (опционально). Если задан, оставит только клиентов у которых есть хотя бы одна подходящая позиция.',
+    properties: {
+      color: { type: 'string' },
+      size: { type: 'string' },
+      kind: { type: 'string' },
+    },
+  },
+  sorts: { type: 'array', description: 'Notion sorts: [{property, direction}]', items: { type: 'object' } },
+  view: { type: 'string', enum: ['list', 'timeline'], description: 'list = плоский список, timeline = по дням' },
+  title: { type: 'string', description: 'Заголовок выдачи для пользователя (например "Заказы на май")' },
   // unclear
   reason: { type: 'string' },
 } as const;
@@ -101,7 +121,50 @@ function buildSystemPrompt(schema: Schema): string {
 - update_position — изменить ОДНУ позицию по positionId (бери поле id=... из списка в контексте) + newColor/newSize/newKind/newQty.
 - add_position — добавить новую позицию: color, size, kind, qty.
 - delete_position — удалить позицию по positionId.
-- show_client / show_orders / show_timeline / unclear.
+- show_client (mode='card'|'receipt').
+- query_orders — поиск/фильтрация заказов. Ты сам строишь Notion-фильтр.
+
+  Схема базы М2026 (используй ТОЧНЫЕ имена свойств):
+  - "НОМЕР" (title) — телефон клиента
+  - "УЧЕБНОЕ ЗАВЕДЕНИЕ" (select) — из schools
+  - "АДРЕС" (select) — из addresses
+  - "ДАТА" (date) — дата выдачи
+  - "СТАТУС" (select) — из statuses
+  - "ЦЕНА" (number), "ОПЛАЧЕНО" (number), "СКИДКА" (number)
+  - "ПРИМЕЧАНИЕ" (rich_text)
+
+  Notion-операторы:
+  - select: { equals, does_not_equal, is_empty, is_not_empty }
+  - date: { equals, before, after, on_or_before, on_or_after, is_empty, is_not_empty }
+  - number: { equals, does_not_equal, greater_than, less_than, greater_than_or_equal_to, less_than_or_equal_to, is_empty, is_not_empty }
+  - rich_text/title: { contains, does_not_contain, equals, is_empty, is_not_empty }
+  - Объединяй через { "and": [...] } или { "or": [...] }.
+
+  Формат фильтра — clientFilter, например:
+  - Заказы на май: { "and": [{"property":"ДАТА","date":{"on_or_after":"2026-05-01"}},{"property":"ДАТА","date":{"on_or_before":"2026-05-31"}}] }
+  - Кто забрал: { "property":"СТАТУС","select":{"equals":"ЗАБРАЛИ"} }
+  - Заказы школы Болашақ: { "property":"УЧЕБНОЕ ЗАВЕДЕНИЕ","select":{"equals":"Болашақ"} }
+
+  positionFilter — отдельный фильтр для базы Позиция (применяется в памяти после загрузки):
+  - { "color":"🟢 зелёный" } — только клиенты у которых есть зелёная позиция
+  - { "kind":"Садик" } — только заказы с садиковскими мантиями
+  - { "size":"M" }, либо комбинация color+size+kind
+
+  sorts — например [{"property":"ДАТА","direction":"ascending"}]
+  limit — для "первые N" / "ближайший" (limit=1)
+  view = 'timeline' для запросов «по дням», «таймлайн», «календарь»; иначе 'list'
+  title — короткий заголовок для пользователя (опционально), например "Заказы на май" или "Синие на эту неделю".
+
+  Примеры query_orders:
+  - "покажи сегодняшние заказы" → clientFilter={"property":"ДАТА","date":{"equals":"${today}"}}, view='list'
+  - "на эту неделю" → диапазон today..(today+6 дней), view='list' или 'timeline' для "по дням"
+  - "на май" → 2026-05-01..2026-05-31, view='list'
+  - "синие на май" → clientFilter=диапазон мая, positionFilter={color:"🔵 синий"}
+  - "кто забрали" → clientFilter={property:"СТАТУС",select:{equals:"ЗАБРАЛИ"}}
+  - "заказы на садик" → positionFilter={kind:"Садик"} (без clientFilter — все клиенты с садиковскими позициями)
+  - "ближайший заказ" → clientFilter={property:"ДАТА",date:{on_or_after:"${today}"}}, sorts=[{property:"ДАТА",direction:"ascending"}], limit=1
+
+- unclear (reason).
 
 ГЛАВНЫЙ ПРИНЦИП: видишь актуальный список позиций клиента в контексте. Сам решай по ним — пользователь говорит на естественном языке, не по индексам.
 
@@ -131,6 +194,7 @@ function buildSystemPrompt(schema: Schema): string {
 - Если есть выбор куда применить (несколько подходят) — применяй ко всем.
 - Уточняющий вопрос задавай ТОЛЬКО если ну никак не вывести — например "+1 студент" без позиций у клиента, или цвета у разных позиций различаются и невозможно понять какой брать.
 - Не выдумывай цвета/размеры/виды — только из списков выше.
+- Оплата: "оплатил ещё N / доплатил N" / "тағы N төледі" → addPaid=N. "оплатил всего N / оплачено N" / "барлығы N төленді" → setPaid=N. "оплатил полностью / закрыл оплату / всё оплачено" / "толығымен төледі" → addPaid = «Остаток к оплате» из контекста. ВАЖНО: если в этом же ответе ты добавляешь/меняешь позиции — пересчитай сумму с учётом новых qty (Сумма = Цена × сумма всех qty после твоих изменений; Остаток = Сумма − текущее Оплачено − Скидка).
 
 Понимаешь русский и казахский. Маппинг (выбирай ближайшее из списков):
 - "забрал/получил/выдан" / каз. "алып кетті/алды/берді" → ЗАБРАЛИ
@@ -310,22 +374,25 @@ function mapToIntent(args: any, schema: Schema): AIIntent {
       const mode = args.mode === 'receipt' ? 'receipt' : 'card';
       return { intent: 'show_client', phone, mode };
     }
-    case 'show_orders': {
-      const r: AIIntent = { intent: 'show_orders' };
-      if (typeof args.startDate === 'string') r.startDate = args.startDate;
-      if (typeof args.endDate === 'string') r.endDate = args.endDate;
+    case 'query_orders': {
+      const r: any = { intent: 'query_orders' };
+      if (args.clientFilter && typeof args.clientFilter === 'object') r.clientFilter = args.clientFilter;
+      if (args.positionFilter && typeof args.positionFilter === 'object') {
+        const pf: any = {};
+        if (args.positionFilter.color) pf.color = validate(args.positionFilter.color, schema.colors);
+        if (args.positionFilter.size) pf.size = validate(args.positionFilter.size, schema.sizes);
+        if (args.positionFilter.kind) pf.kind = validate(args.positionFilter.kind, schema.kinds);
+        if (pf.color || pf.size || pf.kind) r.positionFilter = pf;
+      }
+      if (Array.isArray(args.sorts)) r.sorts = args.sorts;
       if (typeof args.limit === 'number') r.limit = args.limit;
-      if (typeof args.status === 'string') r.status = args.status;
-      if (!r.startDate && !r.endDate && !r.limit) {
-        return { intent: 'unclear', reason: 'Не указан период' };
+      if (args.view === 'timeline') r.view = 'timeline';
+      else r.view = 'list';
+      if (typeof args.title === 'string') r.title = args.title;
+      if (!r.clientFilter && !r.positionFilter && !r.limit) {
+        return { intent: 'unclear', reason: 'Не указан фильтр для запроса' };
       }
       return r;
-    }
-    case 'show_timeline': {
-      if (!args.startDate || !args.endDate) {
-        return { intent: 'unclear', reason: 'Не указан период для таймлайна' };
-      }
-      return { intent: 'show_timeline', startDate: args.startDate, endDate: args.endDate };
     }
     case 'unclear':
     default:

@@ -11,6 +11,10 @@ import {
   searchClientsUpcoming,
   searchClientsByDateRange,
   loadClientPositions,
+  queryClients,
+  ClientSummary,
+  getClient,
+  getPositionsForClient,
   FoundClient,
   FoundPosition,
 } from './notion';
@@ -113,40 +117,52 @@ function formatReceipt(c: FoundClient): string {
   return lines.join('\n');
 }
 
-async function handleShowOrders(
+async function handleQueryOrders(
   ctx: Context,
   env: Env,
-  intent: Extract<AIIntent, { intent: 'show_orders' }>,
+  intent: Extract<AIIntent, { intent: 'query_orders' }>,
 ): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10);
-  let clients: FoundClient[];
-  let header = '';
-  if (intent.startDate && intent.endDate) {
-    const summaries = await searchClientsByDateRange(env.notion, intent.startDate, intent.endDate);
-    clients = await Promise.all(summaries.map(async s => ({
-      ...s,
-      address: undefined,
-      positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map((p, i) => ({ ...p, pageId: '' }))),
-    })));
-    header = `📅 ${intent.startDate === intent.endDate ? intent.startDate : `${intent.startDate} — ${intent.endDate}`}`;
-  } else {
-    const start = intent.startDate ?? today;
-    const limit = intent.limit ?? 10;
-    const summaries = await searchClientsUpcoming(env.notion, start, limit);
-    clients = await Promise.all(summaries.map(async s => ({
-      ...s,
-      address: undefined,
-      positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map((p, i) => ({ ...p, pageId: '' }))),
-    })));
-    header = `📅 Ближайшие ${clients.length} (с ${start})`;
-  }
-  if (clients.length === 0) {
-    await ctx.reply(`${header}\nЗаказов нет.`);
+  // 1. Запрашиваем клиентов через Notion-фильтр
+  let summaries: ClientSummary[];
+  try {
+    summaries = await queryClients(env.notion, intent.clientFilter, intent.sorts, intent.limit ?? 100);
+  } catch (err: any) {
+    await ctx.reply(`❌ Ошибка запроса к Notion: ${err?.message ?? err}`);
     return;
   }
+  // 2. Загружаем позиции
+  let clients: FoundClient[] = await Promise.all(summaries.map(async s => ({
+    ...s,
+    address: undefined,
+    positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map(p => ({ ...p, pageId: '' }))),
+  })));
+  // 3. Фильтр позиций: оставляем клиентов у которых есть хотя бы одна подходящая
+  const pf = intent.positionFilter;
+  if (pf && (pf.color || pf.size || pf.kind)) {
+    clients = clients.filter(c => c.positions.some(p =>
+      (!pf.color || p.color === pf.color) &&
+      (!pf.size || p.size === pf.size) &&
+      (!pf.kind || p.kind === pf.kind),
+    ));
+  }
+  // 4. Limit (на случай если задан и Notion вернул больше)
+  if (intent.limit && clients.length > intent.limit) clients = clients.slice(0, intent.limit);
+
+  const title = intent.title ?? '📦 Заказы';
+  if (clients.length === 0) {
+    await ctx.reply(`${title}\n— ничего не найдено`);
+    return;
+  }
+
+  if (intent.view === 'timeline') {
+    return renderTimeline(ctx, clients, title);
+  }
+  return renderList(ctx, clients, title);
+}
+
+async function renderList(ctx: Context, clients: FoundClient[], title: string): Promise<void> {
   const colorKindTotals = new Map<string, number>();
-  let totalPaid = 0;
-  let totalSum = 0;
+  let totalPaid = 0, totalSum = 0;
   for (const c of clients) {
     const q = totalQty(c.positions);
     if (typeof c.price === 'number') totalSum += c.price * q;
@@ -158,14 +174,14 @@ async function handleShowOrders(
     }
   }
   const out: string[] = [];
-  out.push(header);
+  out.push(title);
   out.push(`📦 Заказов: ${clients.length}`);
   if (colorKindTotals.size) {
     out.push('🎨 Итого:');
     for (const [k, q] of colorKindTotals) out.push(`   • ${k} ×${q}`);
   }
-  out.push(`💰 Оплачено: ${totalPaid} тг`);
-  out.push(`💵 Сумма: ${totalSum} тг`);
+  if (totalPaid) out.push(`💰 Оплачено: ${totalPaid} тг`);
+  if (totalSum) out.push(`💵 Сумма: ${totalSum} тг`);
   out.push('');
   for (const c of clients) {
     const head: string[] = [c.phone];
@@ -175,7 +191,8 @@ async function handleShowOrders(
     out.push('— ' + head.join(' · '));
     for (const p of c.positions) out.push(`   • ${formatPos(p)}`);
   }
-  await ctx.reply(out.join('\n').slice(0, 4000));
+  const text = out.join('\n');
+  for (let i = 0; i < text.length; i += 3900) await ctx.reply(text.slice(i, i + 3900));
 }
 
 const KIND_CODE: Record<string, string> = {
@@ -245,14 +262,7 @@ function fmtDayShort(iso: string): string {
   return `${d}.${m}`;
 }
 
-async function handleShowTimeline(ctx: Context, env: Env, startISO: string, endISO: string): Promise<void> {
-  const summaries = await searchClientsByDateRange(env.notion, startISO, endISO);
-  const clients: FoundClient[] = await Promise.all(summaries.map(async s => ({
-    ...s,
-    address: undefined,
-    positions: await loadClientPositions(env.notion, s.pageId).then(arr => arr.map(p => ({ ...p, pageId: '' }))),
-  })));
-  // group by date
+async function renderTimeline(ctx: Context, clients: FoundClient[], title: string): Promise<void> {
   const byDate = new Map<string, FoundClient[]>();
   for (const c of clients) {
     if (!c.date) continue;
@@ -260,8 +270,15 @@ async function handleShowTimeline(ctx: Context, env: Env, startISO: string, endI
     arr.push(c);
     byDate.set(c.date, arr);
   }
-  // iterate days from startISO to endISO
-  const out: string[] = [`📅 Таймлайн ${fmtDayShort(startISO)} — ${fmtDayShort(endISO)}`, ''];
+  // Диапазон от мин до макс даты
+  const allDates = clients.map(c => c.date).filter(Boolean).sort() as string[];
+  if (allDates.length === 0) {
+    await ctx.reply(`${title}\nЗаказов без даты: ${clients.length}`);
+    return;
+  }
+  const startISO = allDates[0];
+  const endISO = allDates[allDates.length - 1];
+  const out: string[] = [`${title} (${fmtDayShort(startISO)} — ${fmtDayShort(endISO)})`, ''];
   const start = new Date(startISO + 'T00:00:00');
   const end = new Date(endISO + 'T00:00:00');
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
@@ -291,7 +308,7 @@ function buildClientContext(c: FoundClient): string {
   if (c.school) lines.push(`Школа: ${c.school}`);
   if (c.date) lines.push(`Дата выдачи: ${c.date}`);
   if (c.status) lines.push(`Статус: ${c.status}`);
-  if (typeof c.price === 'number') lines.push(`Цена: ${c.price}`);
+  if (typeof c.price === 'number') lines.push(`Цена за ед: ${c.price}`);
   if (typeof c.paid === 'number') lines.push(`Оплачено: ${c.paid}`);
   if (typeof c.discount === 'number') lines.push(`Скидка: ${c.discount}`);
   if (c.note) lines.push(`Примечание: ${c.note}`);
@@ -299,6 +316,14 @@ function buildClientContext(c: FoundClient): string {
     lines.push(`Позиции (${c.positions.length}):`);
     for (const p of c.positions) {
       lines.push(`  - id=${p.pageId} ${p.color ?? '?'} ${p.size ?? '?'} ${p.kind ?? '?'} ×${p.qty ?? '?'}`);
+    }
+    const totalQty = c.positions.reduce((s, p) => s + (p.qty ?? 0), 0);
+    if (typeof c.price === 'number' && totalQty > 0) {
+      const sum = c.price * totalQty;
+      const remaining = sum - (c.paid ?? 0) - (c.discount ?? 0);
+      lines.push(`Всего штук: ${totalQty}`);
+      lines.push(`Сумма заказа: ${sum}`);
+      lines.push(`Остаток к оплате: ${remaining}`);
     }
   }
   return lines.join('\n');
@@ -330,6 +355,10 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
       if (candidates.length === 1) {
         prefetchedClient = candidates[0];
         clientContext = buildClientContext(prefetchedClient);
+        // Показываем какого клиента взяли — только в начале треда
+        if (history.length === 0) {
+          await ctx.reply(`📋 Запрос по контакту:\n${formatFullCard(prefetchedClient)}`);
+        }
       } else if (candidates.length > 1 && history.length === 0) {
         // Несколько кандидатов на старте треда — даём пикер
         session.aiPickContext = { text, expiresAt: Date.now() + THREAD_TTL_MS };
@@ -367,7 +396,7 @@ export async function handleAIMessage(ctx: Context, env: Env, text: string): Pro
       delete session.aiThread;
       await saveSession(env.kv, userId, session);
     }
-    return handleParsedActions(ctx, env, r.actions, usageLine, prefetchedClient);
+    return handleParsedActions(ctx, env, r.actions, usageLine, prefetchedClient, text);
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка AI: ${err?.message ?? err}`);
   }
@@ -379,6 +408,7 @@ export async function handleParsedActions(
   actions: AIIntent[],
   usageLine: string,
   prefetched?: FoundClient,
+  originalText?: string,
 ): Promise<void> {
   // Сначала разбираем show / unclear (read-only) — выводим сразу, не накапливаем
   for (const a of actions) {
@@ -388,10 +418,9 @@ export async function handleParsedActions(
     }
   }
 
-  const showActions = actions.filter(a => a.intent === 'show_client' || a.intent === 'show_orders' || a.intent === 'show_timeline');
+  const showActions = actions.filter(a => a.intent === 'show_client' || a.intent === 'query_orders');
   for (const a of showActions) {
-    if (a.intent === 'show_orders') await handleShowOrders(ctx, env, a);
-    else if (a.intent === 'show_timeline') await handleShowTimeline(ctx, env, a.startDate, a.endDate);
+    if (a.intent === 'query_orders') await handleQueryOrders(ctx, env, a);
     else if (a.intent === 'show_client') {
       const clients = await findClientsByPhone(env.notion, a.phone);
       if (clients.length === 0) { await ctx.reply(`❌ Клиент с номером ${a.phone} не найден.`); continue; }
@@ -411,22 +440,27 @@ export async function handleParsedActions(
     return;
   }
 
-  // Если в actions телефон не указан, но есть prefetched клиент — подставляем его
+  // Если есть prefetched клиент — все действия его (форсим, чтобы не тупить на разных форматах)
   if (prefetched) {
-    for (const a of editActions) {
-      if (!(a as any).phone) (a as any).phone = prefetched.phone;
-    }
+    for (const a of editActions) (a as any).phone = prefetched.phone;
   }
-  const phones = new Set(editActions.map(a => (a as any).phone).filter(Boolean));
-  if (phones.size === 0) {
+  // Сравниваем по цифрам, чтобы "8091" и "+77784460091" считались одним клиентом
+  const digitsSet = new Set(editActions.map(a => ((a as any).phone ?? '').replace(/\D/g, '')).filter(Boolean));
+  if (digitsSet.size === 0) {
     await ctx.reply(`❌ Не указан телефон клиента.\n\n${usageLine}`);
     return;
   }
-  if (phones.size > 1) {
-    await ctx.reply(`❌ Действия для разных клиентов в одном запросе пока не поддерживаются.\n\n${usageLine}`);
-    return;
+  if (digitsSet.size > 1) {
+    // Возможно это просто разные хвосты одного и того же номера. Берём самый длинный, остальные приводим к нему.
+    const longest = [...digitsSet].reduce((a, b) => b.length > a.length ? b : a);
+    const allMatch = [...digitsSet].every(d => longest.endsWith(d) || d.endsWith(longest));
+    if (!allMatch) {
+      await ctx.reply(`❌ Действия для разных клиентов в одном запросе пока не поддерживаются.\n\n${usageLine}`);
+      return;
+    }
+    for (const a of editActions) (a as any).phone = longest;
   }
-  const phone = [...phones][0];
+  const phone = (editActions[0] as any).phone as string;
 
   let client: FoundClient;
   if (prefetched && prefetched.phone.replace(/\D/g, '').endsWith(phone.replace(/\D/g, ''))) {
@@ -512,7 +546,7 @@ export async function handleParsedActions(
   // Защита: мержим дубликаты позиций по (color,size,kind) — AI не всегда видит это.
   const merged = mergeDuplicatePositions(client, ops, descLines);
 
-  await saveAndPrompt(ctx, env, client, merged.descLines.join('\n'), usageLine, merged.ops);
+  await saveAndPrompt(ctx, env, client, merged.descLines.join('\n'), usageLine, merged.ops, originalText);
 }
 
 /** Симулирует состояние позиций после ops и сливает дубликаты по (color,size,kind). */
@@ -606,6 +640,7 @@ async function saveAndPrompt(
   description: string,
   usageLine: string | undefined,
   operations: PendingOp[],
+  originalText?: string,
 ): Promise<void> {
   const userId = ctx.from!.id;
   const session = emptySession();
@@ -615,10 +650,14 @@ async function saveAndPrompt(
     description,
     operations,
     usageLine,
+    originalText,
+    clientPhone: client.phone,
   };
   await saveSession(env.kv, userId, session);
   const kb = new InlineKeyboard()
     .text('✅ Применить', 'edit:apply')
+    .text('💬 Комментарий', 'edit:comment')
+    .row()
     .text('❌ Отмена', 'edit:cancel');
   const tail = usageLine ? `\n\n${usageLine}` : '';
   await ctx.reply(
@@ -650,9 +689,61 @@ export async function applyPendingEdit(ctx: Context, env: Env): Promise<void> {
     await clearSession(env.kv, userId);
     const tail = pe.usageLine ? `\n${pe.usageLine}` : '';
     await ctx.reply(`✅ Применено: ${pe.description}${tail}`);
+    // Показываем актуальную карточку клиента после изменений
+    try {
+      const fresh = await getFoundClient(env.notion, pe.clientPageId);
+      if (fresh) await ctx.reply(formatFullCard(fresh));
+    } catch {}
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка применения: ${err?.message ?? err}`);
   }
+}
+
+async function getFoundClient(notion: any, pageId: string): Promise<FoundClient | null> {
+  try {
+    const summary = await getClient(notion, pageId);
+    const positions = await getPositionsForClient(notion, pageId);
+    return {
+      ...summary,
+      address: undefined,
+      positions,
+    } as FoundClient;
+  } catch {
+    return null;
+  }
+}
+
+export async function requestEditComment(ctx: Context, env: Env): Promise<void> {
+  const userId = ctx.from!.id;
+  const session = await getSession(env.kv, userId);
+  if (!session.pendingEdit) {
+    await ctx.reply('Нет ожидающих изменений.');
+    return;
+  }
+  session.step = 'edit_comment_input';
+  await saveSession(env.kv, userId, session);
+  await ctx.reply('💬 Что поправить? Напиши комментарий:');
+}
+
+export async function handleEditComment(ctx: Context, env: Env, comment: string): Promise<void> {
+  const userId = ctx.from!.id;
+  const session = await getSession(env.kv, userId);
+  const pe = session.pendingEdit;
+  if (!pe) {
+    await ctx.reply('Сессия истекла. Повтори запрос.');
+    await clearSession(env.kv, userId);
+    return;
+  }
+  // Чистим pending — будем строить новый
+  delete session.pendingEdit;
+  session.step = 'idle';
+  await saveSession(env.kv, userId, session);
+
+  // Собираем "псевдо-тред" из исходного запроса + предыдущего разбора + комментария
+  const orig = pe.originalText ?? '(исходный запрос)';
+  const prev = pe.description;
+  const combined = `Команда: ${orig}\n\nТы предложил:\n${prev}\n\nКомментарий пользователя: ${comment}\n\nПерестрой actions с учётом комментария.`;
+  return handleAIMessage(ctx, env, combined);
 }
 
 export async function cancelPendingEdit(ctx: Context, env: Env): Promise<void> {

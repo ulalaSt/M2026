@@ -13,6 +13,7 @@ export function setDbIds(m2026?: string, positions?: string): void {
 // Telegram user IDs, которым разрешено пользоваться ботом
 export const ALLOWED_USER_IDS = [
   687463957, // основной владелец
+  848831101, // @aleke021121
 ];
 
 // Кэш select-опций живёт в KV столько секунд
